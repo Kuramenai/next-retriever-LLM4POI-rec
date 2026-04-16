@@ -56,6 +56,11 @@ class SpatialEncodingConfig:
     road_distance_stretch_factor: float = 2.0
     distance_bin_edges_m: tuple = (250, 500, 1000, 2000, 5000)
 
+    session_id_col: str = "SessionId"
+    timestamp_col: str = "UTCTimeOffset"
+    category_col: str = "Category"
+    gap_bin_edges_min: tuple = (15, 30, 60, 120, 240)
+
 
 def _validate_poi_columns(df: pd.DataFrame, config: SpatialEncodingConfig) -> None:
     required = [config.poi_id_col, config.lat_col, config.lon_col]
