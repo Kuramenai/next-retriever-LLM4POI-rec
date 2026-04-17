@@ -62,6 +62,10 @@ class SpatialEncodingConfig:
     category_col: str = "Category"
     gap_bin_edges_min: tuple = (15, 30, 60, 120, 240)
 
+    topk_pair_neighbors = 200
+    road_distance_stretch_factor = 2.0
+    distance_bin_edges_m = (250, 500, 1000, 2000, 5000)
+
 
 def _validate_poi_columns(df: pd.DataFrame, config: SpatialEncodingConfig) -> None:
     required = [config.poi_id_col, config.lat_col, config.lon_col]
@@ -185,93 +189,6 @@ def _compute_node_closeness_centrality(road_graph) -> Mapping[int, float]:
 
     centrality = nx.closeness_centrality(G_cc, distance="length")
     return centrality
-
-
-def _normalize_context_token(raw_value: str, source_col: str) -> str:
-    """
-    Minimal normalization.
-    Later, you can replace this with a coarser semantic collapse map.
-    """
-    token = str(raw_value).strip().lower().replace(" ", "_")
-    token = token.replace("/", "_").replace("-", "_")
-    return f"{source_col}:{token}"
-
-
-def _resolve_urban_context_tokens(
-    poi_proj_gdf: gpd.GeoDataFrame,
-    context_gdf: Optional[gpd.GeoDataFrame],
-    config: SpatialEncodingConfig,
-) -> tuple[pd.Series, pd.Series]:
-    """
-    Optional fallback-based urban context assignment.
-    For each POI, inspect nearby OSM context features within a radius and
-    take the first available dominant signal from the configured priority columns.
-    """
-    unknown_token = pd.Series("unknown", index=poi_proj_gdf.index, dtype="object")
-    unknown_source = pd.Series("none", index=poi_proj_gdf.index, dtype="object")
-
-    # fmt:off
-
-    if (
-        (not config.use_urban_context)
-        or (context_gdf is None)
-        or (len(context_gdf) == 0)
-    ):
-        return unknown_token.rename("urban_context_token"), unknown_source.rename("urban_context_source")
-
-    ctx = context_gdf.copy()
-    if ctx.crs is None:
-        raise ValueError("context_gdf must have a CRS.")
-    ctx = ctx.to_crs(poi_proj_gdf.crs)
-
-    # Keep only rows with valid geometries
-    ctx = ctx[ctx.geometry.notna()].copy()
-    if len(ctx) == 0:
-        return unknown_token.rename("urban_context_token"), unknown_source.rename("urban_context_source")
-
-    sindex = ctx.sindex
-
-    tokens = []
-    sources = []
-
-    for geom in poi_proj_gdf.geometry:
-        search_area = geom.buffer(config.urban_context_radius_m)
-        candidate_idx = list(sindex.intersection(search_area.bounds))
-
-        if not candidate_idx:
-            tokens.append("unknown")
-            sources.append("none")
-            continue
-
-        candidates = ctx.iloc[candidate_idx].copy()
-        candidates = candidates[candidates.geometry.intersects(search_area)]
-
-        chosen_token = "unknown"
-        chosen_source = "none"
-
-        if len(candidates) > 0:
-            for col in config.urban_context_priority_cols:
-                if col not in candidates.columns:
-                    continue
-
-                vals = candidates[col].dropna().astype(str).str.strip()
-                vals = vals[vals.ne("")]
-
-                if len(vals) == 0:
-                    continue
-
-                dominant_val = vals.mode().iloc[0]
-                chosen_token = _normalize_context_token(dominant_val, col)
-                chosen_source = col
-                break
-
-        tokens.append(chosen_token)
-        sources.append(chosen_source)
-
-    return (
-        pd.Series(tokens, index=poi_proj_gdf.index, name="urban_context_token"),
-        pd.Series(sources, index=poi_proj_gdf.index, name="urban_context_source"),
-    )
 
 
 def _get_undirected_graph(road_graph) -> nx.Graph:
@@ -427,11 +344,13 @@ def build_poi_spatial_descriptors(
     _validate_poi_columns(poi_df, config)
 
     # 1) Base POI GeoDataFrames
-    cprint("\nProjecting POIs longitudes, latitudes values to new Coordinate Reference System (CRS)...", "yellow")
+    cprint(
+        "\nProjecting POIs longitudes, latitudes values to new Coordinate Reference System (CRS)...",
+        "yellow",
+    )
     poi_gdf_wgs84 = _make_poi_gdf(poi_df, config)
     poi_proj_gdf = _project_gdf(poi_gdf_wgs84)
     cprint("Projection Complete.", "green")
-    
 
     # 2) Multi-scale H3 region tokens
     cprint("\nH3 region assignment...", "yellow")
@@ -453,7 +372,9 @@ def build_poi_spatial_descriptors(
 
     # 3) Density counts + bins
     cprint("\nComputing POIs density...", "yellow")
-    density_counts = _compute_density_counts(poi_proj_gdf, radius_m=config.density_radius_m)
+    density_counts = _compute_density_counts(
+        poi_proj_gdf, radius_m=config.density_radius_m
+    )
     descriptor_df["density_count_500m"] = density_counts.values
     descriptor_df["density_bin"] = _rank_bin(
         density_counts,
@@ -468,33 +389,7 @@ def build_poi_spatial_descriptors(
     descriptor_df["nearest_graph_node_id"] = nearest_nodes.values
     cprint("POIs nearest road-graph node acquired.", "green")
 
-    # 5) Centrality values + bins
-    cprint("\nComputing road centrality and centrality bin (Compute intensive)...", "yellow")
-    if node_centrality is None:
-        node_centrality = _compute_node_closeness_centrality(road_graph)
-
-    # fmt: off
-    descriptor_df["road_centrality_value"] = descriptor_df["nearest_graph_node_id"].map(node_centrality)
-
-    descriptor_df["centrality_bin"] = _rank_bin(
-        descriptor_df["road_centrality_value"],
-        prefix=config.centrality_prefix,
-        num_bins=config.centrality_num_bins,
-    ).values
-    cprint("Centrality bin computation complete.", "green")
-
-    # 6) Optional urban context
-    cprint("Get urban context...", "yellow")
-    urban_context_token, urban_context_source = _resolve_urban_context_tokens(
-        poi_proj_gdf=poi_proj_gdf,
-        context_gdf=context_gdf,
-        config=config,
-    )
-    descriptor_df["urban_context_token"] = urban_context_token.values
-    descriptor_df["urban_context_source"] = urban_context_source.values
-    cprint("Urban context added successfully.", "green")
-
-    # 7) Keep a clean output schema
+    # 5) Keep a clean output schema
     keep_cols = [
         config.poi_id_col,
         config.lat_col,
@@ -504,10 +399,6 @@ def build_poi_spatial_descriptors(
         "density_count_500m",
         "density_bin",
         "nearest_graph_node_id",
-        "road_centrality_value",
-        "centrality_bin",
-        "urban_context_token",
-        "urban_context_source",
     ]
 
     descriptor_df = descriptor_df[keep_cols].copy()
@@ -521,56 +412,48 @@ def build_poi_spatial_descriptors(
 
     return descriptor_df
 
-city = "NYC"
-cprint(f"\nLoading {city} raw checkins data...", "yellow")
-out_dir = Path(f"preprocessed_data/{city}")
-checkins_df = pd.read_csv(out_dir / f"{city}.csv")
-poi_df = checkins_df[["PId", "Latitude", "Longitude"]]
-poi_df = poi_df.drop_duplicates(subset="PId")
-print("Number of checkins:", len(checkins_df))
-print("Number of unique POIs:", len(poi_df))
-cprint("\n Loading complete.", "green")
 
-cprint(f"\nLoading {city} road graph data...", "yellow")
-osm = OSM(f"geo_data/{city.lower()}.osm.pbf")
-nodes, edges = osm.get_network(nodes=True, network_type="walking")
-G_drive = osm.to_graph(nodes, edges, graph_type="networkx")
-cprint("\n Loading complete.", "green")
+# city = "NYC"
+# cprint(f"\nLoading {city} raw checkins data...", "yellow")
+# out_dir = Path(f"preprocessed_data/{city}")
+# checkins_df = pd.read_csv(out_dir / f"{city}.csv")
+# poi_df = checkins_df[["PId", "Latitude", "Longitude"]]
+# poi_df = poi_df.drop_duplicates(subset="PId")
+# print("Number of checkins:", len(checkins_df))
+# print("Number of unique POIs:", len(poi_df))
+# cprint("\nLoading complete.", "green")
 
-config = SpatialEncodingConfig(
-    h3_res_coarse=8,
-    h3_res_fine=9,
-    density_radius_m=500.0,
-    use_urban_context=False,  # keep off for now
-)
+# cprint(f"\nLoading {city} road graph data...", "yellow")
+# osm = OSM(f"geo_data/{city.lower()}.osm.pbf")
+# nodes, edges = osm.get_network(nodes=True, network_type="walking")
+# G_drive = osm.to_graph(nodes, edges, graph_type="networkx")
+# cprint("\n Loading complete.", "green")
 
-# fmt:off
-cprint("\nLoading or recomputing road centrality and centrality bin (Compute intensive)...", "yellow")
-centrality_cache_path = f"artifacts/spatial/{city.lower()}_node_closeness_centrality.pkl"
+# config = SpatialEncodingConfig(
+#     h3_res_coarse=8,
+#     h3_res_fine=9,
+#     density_radius_m=100.0,
+#     use_urban_context=False,  # keep off for now
+# )
 
-node_centrality = get_or_compute_node_closeness_centrality(
-    road_graph=G_drive,
-    cache_path=centrality_cache_path,
-    force_recompute=False,
-    largest_component_only=True,
-    distance_attr="length",
-    strict_cache_check=True,
-)
-cprint("Road centrality computation complete.", "green")
+# cache_path = f"artifacts/spatial/{city.lower()}_node_closeness_centrality.pkl"
 
-cprint("Started building POIs spatial descriptors...", "yellow")
-poi_spatial_df = build_poi_spatial_descriptors(
-    poi_df=poi_df,  # must contain POIId, Latitude, Longitude
-    road_graph=G_drive,  # OSMnx graph
-    config=config,
-    node_centrality=node_centrality,  # or pass a cached dict if already computed
-    context_gdf=None,
-)
-cprint("POIs spatial descriptors built successfully", "green")
+# cprint("Started building POIs spatial descriptors...", "yellow")
+# poi_spatial_df = build_poi_spatial_descriptors(
+#     poi_df=poi_df,  # must contain POIId, Latitude, Longitude
+#     road_graph=G_drive,  # OSMnx graph
+#     config=config,
+#     node_centrality=None,  # or pass a cached dict if already computed
+#     context_gdf=None,
+# )
+# cprint("POIs spatial descriptors built successfully", "green")
+
+# poi_spatial_df.to_csv(
+#     Path(cache_path) / f"{city.lower()}_poi_spatial_descriptors_df.csv"
+# )
 
 # with Path(centrality_cache_path).parent / f"{city.lower()}_poi_spatial_descriptors_df"
 
-poi_spatial_df.to_csv(Path(centrality_cache_path).parent / f"{city.lower()}_poi_spatial_descriptors_df.csv")
 
 # poi_spatial_df.head()
 
