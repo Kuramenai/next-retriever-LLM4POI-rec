@@ -95,3 +95,22 @@ def encode_partial_session_online(
     result["last_observed_poi"] = result["poi_sequence"][-1]
 
     return result
+
+
+# encoded_prefix = encode_partial_session_online(
+#     partial_session_df=current_prefix_df,
+#     poi_descriptor_df=poi_spatial_df,
+#     pair_transition_df=pair_transition_df,
+#     config=config,
+# )
+
+# encoded_prefix["spatial_token_sequence_text"]
+
+# test_session_prefix_df = test_session_df.sort_values(config.timestamp_col).iloc[:-1].copy()
+
+# encoded_prefix = encode_partial_session_online(
+#     partial_session_df=test_session_prefix_df,
+#     poi_descriptor_df=poi_spatial_df,
+#     pair_transition_df=pair_transition_df,
+#     config=config,
+# )
