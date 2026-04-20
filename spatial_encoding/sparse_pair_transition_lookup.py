@@ -8,7 +8,12 @@ from sklearn.neighbors import BallTree
 import concurrent.futures
 import multiprocessing
 
-from extract_poi_spatial_descriptors import (
+from tqdm import tqdm
+from termcolor import cprint
+from pathlib import Path
+from spatial_encoding.extract_poi_spatial_descriptors import SpatialEncodingConfig
+
+from spatial_encoding.extract_poi_spatial_descriptors import (
     _make_poi_gdf,
     _map_pois_to_nearest_graph_nodes,
     _get_undirected_graph,
@@ -104,7 +109,6 @@ def _bin_distances_m(distances_m: np.ndarray, edges_m: tuple[float, ...]) -> np.
     return (
         pd.cut(distances_m, bins=bins, labels=labels, include_lowest=True, right=True)
         .astype(object)
-        .to_numpy()
     )
 
 
@@ -114,7 +118,7 @@ def build_sparse_pair_transition_lookup(
     config,
     *,
     force_recompute_nearest_nodes: bool = False,
-    max_radius_m: float = 3000.0,
+    max_radius_m: float = 1000.0,
     dijkstra_cutoff_padding_m: float = 50.0,
 ) -> pd.DataFrame:
     """
@@ -158,7 +162,9 @@ def build_sparse_pair_transition_lookup(
     unique_src_nodes = np.unique(node_ids)
     chunk_size = max(1, len(unique_src_nodes) // multiprocessing.cpu_count())
     node_chunks = [unique_src_nodes[i : i + chunk_size] for i in range(0, len(unique_src_nodes), chunk_size)]
-
+    chunk_sizes = [len(chunk) for chunk in node_chunks]
+    total_nodes = sum(chunk_sizes)
+    
     cutoff_m = radius_m * float(config.road_distance_stretch_factor) + dijkstra_cutoff_padding_m
     sp_lengths_master = {}
 
@@ -167,12 +173,16 @@ def build_sparse_pair_transition_lookup(
         initializer=_init_worker,
         initargs=(G_work,),
     ) as executor:
-        futures = [
-            executor.submit(_compute_dijkstra_chunk, chunk, cutoff_m)
-            for chunk in node_chunks
-        ]
-        for future in concurrent.futures.as_completed(futures):
-            sp_lengths_master.update(future.result())
+        futures = [executor.submit(_compute_dijkstra_chunk, chunk, cutoff_m) for chunk in node_chunks]
+        
+        # Map each future → its chunk size
+        future_to_size = {
+        future: size for future, size in zip(futures, chunk_sizes)}
+        with tqdm(total=total_nodes, desc="Processing nodes", unit="node") as pbar:
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                sp_lengths_master.update(result)
+                pbar.update(future_to_size[future])
 
     # SCALABILITY FIX: Columnar allocation prevents OOM from millions of dictionaries
     cols = {
@@ -186,11 +196,12 @@ def build_sparse_pair_transition_lookup(
         "bearing_deg": [],
         "direction_bin": [],
         "distance_bin": [],
+        "distance_source": [],
     }
 
     # fmt:off
 
-    for i in range(len(df)):
+    for i in tqdm(range(len(df)), total=len(df), desc="Calculating pair"):
         # Filter out self-loops (distance == 0)
         mask = neighbor_dists_rad_list[i] > 0
         tgt_idx = neighbor_indices_list[i][mask]
@@ -220,6 +231,7 @@ def build_sparse_pair_transition_lookup(
         cols["dst_POIId"].extend(tgt_poi_ids)
         cols["src_node_id"].extend(np.repeat(node_ids[i], len(tgt_idx)))
         cols["dst_node_id"].extend(tgt_nodes)
+        cols["distance_source"].extend(np.where(used_haversine_fallback, "scaled_haversine", "graph").tolist())
         cols["haversine_distance_m"].extend(tgt_haversine_m)
         cols["road_distance_m"].extend(road_distances_m)
         cols["used_haversine_fallback"].extend(used_haversine_fallback)

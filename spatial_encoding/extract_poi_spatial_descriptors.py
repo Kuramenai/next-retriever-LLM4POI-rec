@@ -18,7 +18,7 @@ import h3
 from scipy.spatial import cKDTree
 from termcolor import cprint
 
-from pyrosm import OSM
+# from pyrosm import OSM
 
 
 import pickle

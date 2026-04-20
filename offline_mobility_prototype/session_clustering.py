@@ -259,10 +259,11 @@ if __name__ == "__main__":
     cprint("Starting GMM prototypes fitting...", "yellow")
     cprint("Loading check-in data...", "yellow")
     
-    out_dir = Path("preprocessed_data/NYC/canonical_gap6h_minlen3_split701020")
-    train_checkins = pd.read_csv(out_dir / "step3_train_checkins.csv", parse_dates=["Time"])
-    val_checkins = pd.read_csv(out_dir / "step3_validation_checkins.csv", parse_dates=["Time"])
-    test_checkins = pd.read_csv(out_dir / "step3_test_checkins.csv", parse_dates=["Time"])
+    city = "nyc"
+    out_dir = Path(f"data/{city}")
+    train_checkins = pd.read_csv(out_dir / "train_sample.csv")
+    val_checkins = pd.read_csv(out_dir / "validate_sample_with_traj.csv")
+    test_checkins = pd.read_csv(out_dir / "test_sample.csv")
     
     cprint("Check-in data loaded successfully.", "green")
 
@@ -307,6 +308,7 @@ if __name__ == "__main__":
     print(gmm_data["prototype_summary"].head())
 
     cprint("Saving GMM data", "yellow")
-    with open( out_dir / "module_1_gmm_data.pkl", "wb") as f:
+    cache_path = Path(f"artifacts/{city.lower()}/{city.lower()}_gmm_cluster.pkl")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with cache_path.open("wb") as f:
         pickle.dump(gmm_data, f)
-    # write_csv(gmm_data, out_dir / "module_1_gmm_data")

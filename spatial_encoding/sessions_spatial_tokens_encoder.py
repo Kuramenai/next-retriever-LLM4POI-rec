@@ -4,7 +4,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from sparse_pair_transition_lookup import (
+from spatial_encoding.sparse_pair_transition_lookup import (
     _haversine_from_one_to_many_m,
     _bearing_from_one_to_many_deg,
     _bin_distances_m,

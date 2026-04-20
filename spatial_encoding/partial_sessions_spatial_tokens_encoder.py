@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-from sessions_spatial_tokens_encoder import encode_session_spatial_tokens
+from spatial_encoding.sessions_spatial_tokens_encoder import encode_session_spatial_tokens
 
 
 def encode_partial_session_online(
