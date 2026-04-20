@@ -19,9 +19,9 @@ def _top_m_from_proba(proba: np.ndarray, top_m: int) -> tuple[np.ndarray, np.nda
 
 
 def _build_assignment_table(
-    proba: np.ndarray,
-    meta: pd.DataFrame | None = None,
-    top_m: int = 3,
+        proba: np.ndarray,
+        meta: pd.DataFrame | None = None,
+        top_m: int = 3,
 ) -> pd.DataFrame:
     """
     Build a session-level routing table from posterior probabilities.
@@ -55,20 +55,20 @@ def _build_assignment_table(
 
 
 def fit_gmm_prototypes(
-    X_train: np.ndarray,
-    train_meta: pd.DataFrame | None = None,
-    X_val: np.ndarray | None = None,
-    val_meta: pd.DataFrame | None = None,
-    X_test: np.ndarray | None = None,
-    test_meta: pd.DataFrame | None = None,
-    *,
-    candidate_K: tuple[int, ...] = (10, 20, 30, 50),
-    candidate_covariance_types: tuple[str, ...] = ("diag", "full"),
-    top_m: int = 3,
-    n_init: int = 5,
-    max_iter: int = 300,
-    reg_covar: float = 1e-6,
-    random_state: int = 42,
+        X_train: np.ndarray,
+        train_meta: pd.DataFrame | None = None,
+        X_val: np.ndarray | None = None,
+        val_meta: pd.DataFrame | None = None,
+        X_test: np.ndarray | None = None,
+        test_meta: pd.DataFrame | None = None,
+        *,
+        candidate_K: tuple[int, ...] = (10, 20, 30, 50),
+        candidate_covariance_types: tuple[str, ...] = ("diag", "full"),
+        top_m: int = 3,
+        n_init: int = 5,
+        max_iter: int = 300,
+        reg_covar: float = 1e-6,
+        random_state: int = 42,
 ) -> dict:
     """
     Fit GMM prototypes with BIC-based model selection on training data.
@@ -105,10 +105,10 @@ def fit_gmm_prototypes(
     best_bic = np.inf
 
     for covariance_type in tqdm(
-        candidate_covariance_types,
-        dynamic_ncols=True,
-        total=len(candidate_covariance_types),
-        desc="Finding best covariance type",
+            candidate_covariance_types,
+            dynamic_ncols=True,
+            total=len(candidate_covariance_types),
+            desc="Finding best covariance type",
     ):
         for K in candidate_K:
             try:
@@ -258,22 +258,25 @@ def fit_gmm_prototypes(
 if __name__ == "__main__":
     cprint("Starting GMM prototypes fitting...", "yellow")
     cprint("Loading check-in data...", "yellow")
-    
+
     city = "nyc"
     out_dir = Path(f"data/{city}")
     train_checkins = pd.read_csv(out_dir / "train_sample.csv")
     val_checkins = pd.read_csv(out_dir / "validate_sample_with_traj.csv")
     test_checkins = pd.read_csv(out_dir / "test_sample.csv")
-    
-    train_checkins = train_checkins.rename(columns={"pseudo_session_trajectory_id": "SessionId", "PoiCategoryId": "PId"})
+
+    train_checkins = train_checkins.rename(
+        columns={"pseudo_session_trajectory_id": "SessionId", "PoiCategoryId": "PId", "PoiCategoryName": "Category"})
     train_checkins["Time"] = pd.to_datetime(train_checkins["UTCTimeOffset"])
-    
-    val_checkins = val_checkins.rename(columns={"pseudo_session_trajectory_id": "SessionId", "PoiCategoryId": "PId"})
+
+    val_checkins = val_checkins.rename(
+        columns={"pseudo_session_trajectory_id": "SessionId", "PoiCategoryId": "PId", "PoiCategoryName": "Category"})
     val_checkins["Time"] = pd.to_datetime(val_checkins["UTCTimeOffset"])
-    
-    test_checkins = test_checkins.rename(columns={"pseudo_session_trajectory_id": "SessionId", "PoiCategoryId": "PId"})
+
+    test_checkins = test_checkins.rename(
+        columns={"pseudo_session_trajectory_id": "SessionId", "PoiCategoryId": "PId", "PoiCategoryName": "Category"})
     test_checkins["Time"] = pd.to_datetime(test_checkins["UTCTimeOffset"])
-    
+
     cprint("Check-in data loaded successfully.", "green")
 
     cprint("Building feature blocks...", "yellow")
@@ -287,7 +290,7 @@ if __name__ == "__main__":
         category_svd_components=64,
         random_state=42,
     )
-    
+
     cprint("Feature blocks built successfully.", "green")
 
     cprint("Fitting GMM prototypes...", "yellow")
@@ -306,7 +309,7 @@ if __name__ == "__main__":
         reg_covar=1e-6,
         random_state=42,
     )
-    
+
     cprint("GMM prototypes fitted successfully.", "green")
 
     cprint("Best configuration: ", "yellow", end="")
