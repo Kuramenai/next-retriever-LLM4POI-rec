@@ -133,7 +133,6 @@ def build_temporal_feature_matrix(
     """
     
     df = session_checkins_df.copy()
-    df = df.rename(columns={"pseudo_session_trajectory_id": "SessionId", "PoiCategoryId": "PId"})
     df["Time"] = pd.to_datetime(df["UTCTimeOffset"])
     df = df.sort_values(["SessionId", "Time", "PId"]).reset_index(drop=True)
 

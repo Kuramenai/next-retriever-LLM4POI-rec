@@ -265,6 +265,15 @@ if __name__ == "__main__":
     val_checkins = pd.read_csv(out_dir / "validate_sample_with_traj.csv")
     test_checkins = pd.read_csv(out_dir / "test_sample.csv")
     
+    train_checkins = train_checkins.rename(columns={"pseudo_session_trajectory_id": "SessionId", "PoiCategoryId": "PId"})
+    train_checkins["Time"] = pd.to_datetime(train_checkins["UTCTimeOffset"])
+    
+    val_checkins = val_checkins.rename(columns={"pseudo_session_trajectory_id": "SessionId", "PoiCategoryId": "PId"})
+    val_checkins["Time"] = pd.to_datetime(val_checkins["UTCTimeOffset"])
+    
+    test_checkins = test_checkins.rename(columns={"pseudo_session_trajectory_id": "SessionId", "PoiCategoryId": "PId"})
+    test_checkins["Time"] = pd.to_datetime(test_checkins["UTCTimeOffset"])
+    
     cprint("Check-in data loaded successfully.", "green")
 
     cprint("Building feature blocks...", "yellow")
