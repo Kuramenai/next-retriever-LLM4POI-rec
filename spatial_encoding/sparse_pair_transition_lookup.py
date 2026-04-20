@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pickle
 import numpy as np
 import pandas as pd
 import networkx as nx
@@ -10,9 +11,9 @@ import multiprocessing
 
 from tqdm import tqdm
 from termcolor import cprint
-from spatial_encoding.extract_poi_spatial_descriptors import SpatialEncodingConfig
+from extract_poi_spatial_descriptors import SpatialEncodingConfig
 
-from spatial_encoding.extract_poi_spatial_descriptors import (
+from extract_poi_spatial_descriptors import (
     _make_poi_gdf,
     _map_pois_to_nearest_graph_nodes,
     _get_undirected_graph,
@@ -246,3 +247,29 @@ def build_sparse_pair_transition_lookup(
         pair_df = pair_df.loc[~dup_mask].copy()
 
     return pair_df
+
+
+if __name__ == "__main__":
+    config = SpatialEncodingConfig(
+        h3_res_coarse=8, h3_res_fine=9, density_radius_m=100.0, timestamp_col="Time"
+    )
+
+    city = "tky"
+    scrip_dir = Path(__file__).resolve().parent.parent
+
+    cprint(f"\nLoading {city} raw checkins data...", "yellow")
+    checkins_df = pd.read_csv(scrip_dir / f"data/{city}/sample.csv")
+    poi_df = checkins_df[["PoiId", "Latitude", "Longitude"]]
+    poi_df = poi_df.drop_duplicates(subset="PoiId")
+    print("Number of checkins:", len(checkins_df))
+    print("Number of unique POIs:", len(poi_df))
+    print("Number of unique POIs (sanity check):", checkins_df.PoiId.nunique())
+
+    with open(scrip_dir / f"geo_data/{city}_graph.pkl", "rb") as f:
+        road_graph = pickle.load(f)
+
+    pair_df = build_sparse_pair_transition_lookup(poi_df, road_graph, config)
+
+    cache_path = scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv"
+
+    pair_df.to_csv(cache_path)

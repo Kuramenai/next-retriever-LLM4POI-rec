@@ -34,7 +34,7 @@ class SpatialEncodingConfig:
     connectivity_num_bins: int = 5
 
     # Column names in the incoming POI dataframe
-    poi_id_col: str = "PId"
+    poi_id_col: str = "PoiId"
     lat_col: str = "Latitude"
     lon_col: str = "Longitude"
 
@@ -45,9 +45,9 @@ class SpatialEncodingConfig:
     road_distance_stretch_factor: float = 2.0
     distance_bin_edges_m: tuple = (250, 500, 1000, 2000, 5000)
 
-    session_id_col: str = "SessionId"
+    session_id_col: str = "pseudo_session_trajectory_id"
     timestamp_col: str = "UTCTimeOffset"
-    category_col: str = "Category"
+    category_col: str = "PoiCategoryName"
     gap_bin_edges_min: tuple = (15, 30, 60, 120, 240)
 
 
@@ -140,9 +140,7 @@ def _map_pois_to_nearest_graph_nodes(
     ys = poi_for_graph.geometry.y.to_numpy()
 
     nearest_nodes = ox.distance.nearest_nodes(road_graph, X=xs, Y=ys)
-    return pd.Series(
-        nearest_nodes, index=poi_gdf_wgs84.index, name="nearest_graph_node_id"
-    )
+    return pd.Series(nearest_nodes, index=poi_gdf_wgs84.index, name="nearest_graph_node_id")  # fmt: skip
 
 
 def _get_undirected_graph(road_graph) -> nx.Graph:
@@ -230,9 +228,7 @@ def build_poi_spatial_descriptors(
 
     # 3) Density counts + bins
     cprint("\nComputing POIs density...", "yellow")
-    density_counts = _compute_density_counts(
-        poi_proj_gdf, radius_m=config.density_radius_m
-    )
+    density_counts = _compute_density_counts(poi_proj_gdf, radius_m=config.density_radius_m)  # fmt: skip
     descriptor_df["density_count"] = density_counts.values
     descriptor_df["density_bin"] = _rank_bin(
         density_counts,
@@ -274,8 +270,31 @@ def build_poi_spatial_descriptors(
     # Defensive uniqueness check
     if descriptor_df[config.poi_id_col].duplicated().any():
         dup_count = descriptor_df[config.poi_id_col].duplicated().sum()
-        raise ValueError(
-            f"POI ID column contains duplicates: {dup_count} duplicated rows found."
-        )
+        raise ValueError(f"POI ID column contains duplicates: {dup_count} duplicated rows found.")  # fmt: skip
 
     return descriptor_df
+
+
+if __name__ == "__main__":
+    config = SpatialEncodingConfig(
+        h3_res_coarse=8, h3_res_fine=9, density_radius_m=100.0, timestamp_col="Time"
+    )
+
+    city = "nyc"
+    scrip_dir = Path(__file__).resolve().parent.parent
+
+    cprint(f"\nLoading {city} raw checkins data...", "yellow")
+    checkins_df = pd.read_csv(scrip_dir / f"data/{city}/sample.csv")
+    poi_df = checkins_df[["PoiId", "Latitude", "Longitude"]]
+    poi_df = poi_df.drop_duplicates(subset="PoiId")
+    print("Number of checkins:", len(checkins_df))
+    print("Number of unique POIs:", len(poi_df))
+
+    with open(scrip_dir / f"geo_data/{city}_graph.pkl", "rb") as f:
+        road_graph = pickle.load(f)
+
+    descriptor_df = build_poi_spatial_descriptors(poi_df, road_graph, config)
+
+    cache_path = scrip_dir / f"artifacts/{city}/{city}_poi_descriptor.csv"
+
+    descriptor_df.to_csv(cache_path)

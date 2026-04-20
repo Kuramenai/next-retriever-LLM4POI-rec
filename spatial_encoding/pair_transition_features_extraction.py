@@ -14,23 +14,29 @@ via (session_id, transition_index) lookup — no spatial math at encoding time.
 
 from __future__ import annotations
 
+import pickle
+from pathlib import Path
 from typing import Any
+
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+from termcolor import cprint
 
-from spatial_encoding.sparse_pair_transition_lookup import (
+from sparse_pair_transition_lookup import (
     _haversine_from_one_to_many_m,
     _bearing_from_one_to_many_deg,
     _bin_distances_m,
     _bearing_deg_to_direction_bin,
 )
+from extract_poi_spatial_descriptors import SpatialEncodingConfig
 
 
 # ---------------------------------------------------------------------------
 # Temporal gap binning (canonical implementation — minutes format)
 # ---------------------------------------------------------------------------
+
 
 def _gap_bin_minutes(gap_min: float, edges_min: tuple[float, ...]) -> str:
     """
@@ -39,7 +45,7 @@ def _gap_bin_minutes(gap_min: float, edges_min: tuple[float, ...]) -> str:
     Returns 'BOS' for NaN (beginning-of-session sentinel).
     """
     if pd.isna(gap_min):
-        return "BOS"
+        raise ValueError("Value error for gap")
 
     lower = 0
     for edge in edges_min:
@@ -52,6 +58,7 @@ def _gap_bin_minutes(gap_min: float, edges_min: tuple[float, ...]) -> str:
 # ---------------------------------------------------------------------------
 # Lookup-dict builders (called once, reused across sessions)
 # ---------------------------------------------------------------------------
+
 
 def build_pair_lookup_dict(
     pair_lookup_df: pd.DataFrame,
@@ -89,6 +96,7 @@ def build_poi_coord_map(
 # ---------------------------------------------------------------------------
 # Core: single-session transition computation
 # ---------------------------------------------------------------------------
+
 
 def compute_single_session_transitions(
     session_df: pd.DataFrame,
@@ -205,9 +213,7 @@ def compute_single_session_transitions(
             distance_bin = _bin_distances_m(
                 np.array([scaled_dist]), edges_m=dist_edges_m
             )[0]
-            direction_bin = _bearing_deg_to_direction_bin(
-                np.array([bearing])
-            )[0]
+            direction_bin = _bearing_deg_to_direction_bin(np.array([bearing]))[0]
 
         records.append(
             {
@@ -227,6 +233,7 @@ def compute_single_session_transitions(
 # ---------------------------------------------------------------------------
 # Batch: all sessions
 # ---------------------------------------------------------------------------
+
 
 def build_all_session_transition_descriptors(
     checkins_df: pd.DataFrame,
@@ -274,15 +281,15 @@ def build_all_session_transition_descriptors(
 
     # Sort and parse timestamps globally
     df = checkins_df.copy()
-    df[config.timestamp_col] = pd.to_datetime(
-        df[config.timestamp_col], errors="coerce"
-    )
-    df = df.sort_values(
-        [config.session_id_col, config.timestamp_col]
-    ).reset_index(drop=True)
+    df[config.timestamp_col] = pd.to_datetime(df[config.timestamp_col], errors="coerce")
+    df = df.sort_values([config.session_id_col, config.timestamp_col]).reset_index(drop=True)  # fmt:off
 
     groups = df.groupby(config.session_id_col, sort=False)
-    iterator = tqdm(groups, desc="Computing transitions", unit="session") if show_progress else groups
+    iterator = (
+        tqdm(groups, desc="Computing transitions", unit="session")
+        if show_progress
+        else groups
+    )
 
     all_transitions: list[pd.DataFrame] = []
 
@@ -311,3 +318,40 @@ def build_all_session_transition_descriptors(
         )
 
     return pd.concat(all_transitions, ignore_index=True)
+
+
+if __name__ == "__main__":
+    config = SpatialEncodingConfig(
+        h3_res_coarse=8,
+        h3_res_fine=9,
+        density_radius_m=100.0,
+        timestamp_col="UTCTimeOffset",
+    )
+
+    city = "tky"
+    scrip_dir = Path(__file__).resolve().parent.parent
+
+    cprint(f"\nLoading {city} raw checkins data...", "yellow")
+    checkins_df = pd.read_csv(scrip_dir / f"data/{city}/sample.csv")
+    poi_df = checkins_df[["PoiId", "Latitude", "Longitude"]]
+    poi_df = poi_df.drop_duplicates(subset="PoiId")
+    print("Number of checkins:", len(checkins_df))
+    print("Number of unique POIs:", len(poi_df))
+    print("Number of unique POIs (sanity check):", checkins_df.PoiId.nunique())
+
+    with open(scrip_dir / f"geo_data/{city}_graph.pkl", "rb") as f:
+        road_graph = pickle.load(f)
+
+    checkins_df = pd.read_csv(scrip_dir / f"data/{city}/train_sample.csv")
+
+    pair_df = pd.read_csv(
+        scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv"
+    )
+
+    session_transition_df = build_all_session_transition_descriptors(
+        checkins_df, pair_df, poi_df, config
+    )
+
+    cache_path = scrip_dir / f"artifacts/{city}/{city}_session_transition.csv"
+
+    session_transition_df.to_csv(cache_path)
