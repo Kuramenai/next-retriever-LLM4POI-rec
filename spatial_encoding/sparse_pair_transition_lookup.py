@@ -10,7 +10,6 @@ import multiprocessing
 
 from tqdm import tqdm
 from termcolor import cprint
-from pathlib import Path
 from spatial_encoding.extract_poi_spatial_descriptors import SpatialEncodingConfig
 
 from spatial_encoding.extract_poi_spatial_descriptors import (
@@ -106,10 +105,9 @@ def _distance_bin_labels(edges_m: tuple[float, ...]) -> list[str]:
 def _bin_distances_m(distances_m: np.ndarray, edges_m: tuple[float, ...]) -> np.ndarray:
     bins = [0.0, *edges_m, np.inf]
     labels = _distance_bin_labels(edges_m)
-    return (
-        pd.cut(distances_m, bins=bins, labels=labels, include_lowest=True, right=True)
-        .astype(object)
-    )
+    return pd.cut(
+        distances_m, bins=bins, labels=labels, include_lowest=True, right=True
+    ).astype(object)
 
 
 def build_sparse_pair_transition_lookup(
@@ -164,7 +162,7 @@ def build_sparse_pair_transition_lookup(
     node_chunks = [unique_src_nodes[i : i + chunk_size] for i in range(0, len(unique_src_nodes), chunk_size)]
     chunk_sizes = [len(chunk) for chunk in node_chunks]
     total_nodes = sum(chunk_sizes)
-    
+
     cutoff_m = radius_m * float(config.road_distance_stretch_factor) + dijkstra_cutoff_padding_m
     sp_lengths_master = {}
 

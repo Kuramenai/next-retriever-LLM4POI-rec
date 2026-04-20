@@ -31,7 +31,7 @@ class SpatialEncodingConfig:
 
     density_radius_m: float = 100.0
     density_num_bins: int = 5
-    connectivity_num_bins : int = 5
+    connectivity_num_bins: int = 5
 
     # Column names in the incoming POI dataframe
     poi_id_col: str = "PId"
@@ -40,8 +40,8 @@ class SpatialEncodingConfig:
 
     # Output token prefixes
     density_prefix: str = "D"
-    connectivity_prefix:str = "C"
-    
+    connectivity_prefix: str = "C"
+
     road_distance_stretch_factor: float = 2.0
     distance_bin_edges_m: tuple = (250, 500, 1000, 2000, 5000)
 
@@ -49,8 +49,7 @@ class SpatialEncodingConfig:
     timestamp_col: str = "UTCTimeOffset"
     category_col: str = "Category"
     gap_bin_edges_min: tuple = (15, 30, 60, 120, 240)
-    
-    
+
 
 def _validate_poi_columns(df: pd.DataFrame, config: SpatialEncodingConfig) -> None:
     required = [config.poi_id_col, config.lat_col, config.lon_col]
@@ -174,9 +173,6 @@ def _graph_cache_signature(road_graph) -> dict:
     }
 
 
-
-
-
 def build_poi_spatial_descriptors(
     poi_df: pd.DataFrame,
     road_graph,
@@ -250,10 +246,14 @@ def build_poi_spatial_descriptors(
     nearest_nodes = _map_pois_to_nearest_graph_nodes(poi_gdf_wgs84, road_graph)
     descriptor_df["nearest_graph_node_id"] = nearest_nodes.values
     cprint("POIs nearest road-graph node acquired.", "green")
-    
+
     degree = dict(road_graph.degree(weight=None))
     descriptor_df["node_degree"] = nearest_nodes.map(degree)
-    descriptor_df["connectivity_bin"] = _rank_bin(descriptor_df["node_degree"], config.connectivity_prefix, config.connectivity_num_bins)
+    descriptor_df["connectivity_bin"] = _rank_bin(
+        descriptor_df["node_degree"],
+        config.connectivity_prefix,
+        config.connectivity_num_bins,
+    )
 
     # 5) Keep a clean output schema
     keep_cols = [
@@ -274,6 +274,8 @@ def build_poi_spatial_descriptors(
     # Defensive uniqueness check
     if descriptor_df[config.poi_id_col].duplicated().any():
         dup_count = descriptor_df[config.poi_id_col].duplicated().sum()
-        raise ValueError(f"POI ID column contains duplicates: {dup_count} duplicated rows found.")
+        raise ValueError(
+            f"POI ID column contains duplicates: {dup_count} duplicated rows found."
+        )
 
     return descriptor_df
