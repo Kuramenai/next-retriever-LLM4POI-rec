@@ -57,8 +57,6 @@ def _serialize_spatial_token(token: dict[str, Any]) -> str:
         f"|DIR:{token['direction_bin']}"
         f"|GAP:{token['gap_bin']}"
         f"|DEN:{token['density_bin']}"
-        f"|CTR:{token['centrality_bin']}"
-        f"|CTX:{token['urban_context_token']}"
     )
 
 
@@ -84,8 +82,6 @@ def encode_session_spatial_tokens(
     - region_coarse_token
     - region_fine_token
     - density_bin
-    - centrality_bin
-    - urban_context_token
     - Latitude / Longitude (via config.lat_col / config.lon_col) for fallback bearing/haversine
 
     Expected pair_transition_df columns
@@ -133,8 +129,6 @@ def encode_session_spatial_tokens(
         "region_coarse_token",
         "region_fine_token",
         "density_bin",
-        "centrality_bin",
-        "urban_context_token",
         config.lat_col,
         config.lon_col,
     ]
@@ -250,8 +244,6 @@ def encode_session_spatial_tokens(
                 "direction_bin": direction_bin,
                 "gap_bin": gap_bin,
                 "density_bin": poi_desc["density_bin"],
-                "centrality_bin": poi_desc["centrality_bin"],
-                "urban_context_token": poi_desc["urban_context_token"],
             }
 
             token_sequence.append(token)

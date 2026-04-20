@@ -31,18 +31,7 @@ class SpatialEncodingConfig:
 
     density_radius_m: float = 100.0
     density_num_bins: int = 5
-    centrality_num_bins: int = 5
-
-    use_urban_context: bool = False
-    urban_context_radius_m: float = 150.0
-    urban_context_priority_cols: Sequence[str] = (
-        "amenity",
-        "shop",
-        "leisure",
-        "tourism",
-        "landuse",
-        "highway",
-    )
+    connectivity_num_bins : int = 5
 
     # Column names in the incoming POI dataframe
     poi_id_col: str = "PId"
@@ -51,9 +40,8 @@ class SpatialEncodingConfig:
 
     # Output token prefixes
     density_prefix: str = "D"
-    centrality_prefix: str = "C"
-
-    topk_pair_neighbors: int = 200
+    connectivity_prefix:str = "C"
+    
     road_distance_stretch_factor: float = 2.0
     distance_bin_edges_m: tuple = (250, 500, 1000, 2000, 5000)
 
@@ -61,11 +49,8 @@ class SpatialEncodingConfig:
     timestamp_col: str = "UTCTimeOffset"
     category_col: str = "Category"
     gap_bin_edges_min: tuple = (15, 30, 60, 120, 240)
-
-    topk_pair_neighbors = 200
-    road_distance_stretch_factor = 2.0
-    distance_bin_edges_m = (250, 500, 1000, 2000, 5000)
-
+    
+    
 
 def _validate_poi_columns(df: pd.DataFrame, config: SpatialEncodingConfig) -> None:
     required = [config.poi_id_col, config.lat_col, config.lon_col]
@@ -131,7 +116,7 @@ def _compute_density_counts(
     neighbor_indices = tree.query_ball_point(coords, r=radius_m)
     counts = np.array([max(len(idx_list) - 1, 0) for idx_list in neighbor_indices], dtype=int)
 
-    return pd.Series(counts, index=poi_proj_gdf.index, name="density_count_500m")
+    return pd.Series(counts, index=poi_proj_gdf.index, name="density_count")
 
 
 def _get_graph_crs(road_graph) -> str:
@@ -161,40 +146,9 @@ def _map_pois_to_nearest_graph_nodes(
     )
 
 
-def _compute_node_closeness_centrality(road_graph) -> Mapping[int, float]:
-    """
-    Heavy operation. Prefer caching the result outside this function if possible.
-    Computes closeness centrality on the largest connected component
-    of an undirected road graph, weighted by edge length.
-    """
-    warnings.warn(
-        "Computing closeness centrality inside build_poi_spatial_descriptors(...). "
-        "This can be slow on large city graphs; cache and pass node_centrality if possible.",
-        RuntimeWarning,
-    )
-
-    try:
-        G_u = ox.convert.to_undirected(road_graph)
-    except Exception:
-        G_u = road_graph.to_undirected()
-
-    if not isinstance(G_u, nx.Graph):
-        G_u = nx.Graph(G_u)
-
-    if G_u.number_of_nodes() == 0:
-        raise ValueError("Road graph is empty.")
-
-    largest_cc_nodes = max(nx.connected_components(G_u), key=len)
-    G_cc = G_u.subgraph(largest_cc_nodes).copy()
-
-    centrality = nx.closeness_centrality(G_cc, distance="length")
-    return centrality
-
-
 def _get_undirected_graph(road_graph) -> nx.Graph:
     """
-    Convert an OSMnx road graph to an undirected simple graph suitable
-    for centrality computation.
+    Convert an OSMnx road graph to an undirected simple graph.
     """
     try:
         G_u = ox.convert.to_undirected(road_graph)
@@ -220,102 +174,13 @@ def _graph_cache_signature(road_graph) -> dict:
     }
 
 
-def get_or_compute_node_closeness_centrality(
-    road_graph,
-    cache_path: str | Path,
-    *,
-    force_recompute: bool = False,
-    largest_component_only: bool = True,
-    distance_attr: str = "length",
-    strict_cache_check: bool = True,
-) -> Mapping[int, float]:
-    """
-    Load node closeness centrality from disk if available, otherwise compute and cache it.
 
-    Parameters
-    ----------
-    road_graph:
-        OSMnx road graph.
-    cache_path:
-        Path to a pickle cache file.
-    force_recompute:
-        If True, ignore any existing cache and recompute.
-    largest_component_only:
-        If True, compute centrality only on the graph's largest connected component.
-        This is usually what you want for city road graphs.
-    distance_attr:
-        Edge attribute used as distance weight, usually 'length'.
-    strict_cache_check:
-        If True, raise an error when cache metadata does not match the current graph.
-        If False, emit a warning and still use the cache.
-
-    Returns
-    -------
-    centrality_dict:
-        Mapping {node_id -> closeness_centrality}
-    """
-    cache_path = Path(cache_path)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-
-    current_sig = _graph_cache_signature(road_graph)
-
-    if cache_path.exists() and not force_recompute:
-        with cache_path.open("rb") as f:
-            payload = pickle.load(f)
-
-        if not isinstance(payload, dict) or "centrality" not in payload:
-            raise ValueError(f"Cache file at {cache_path} has an unexpected format.")
-
-        cached_sig = payload.get("graph_signature", {})
-        cache_matches = cached_sig == current_sig
-
-        if not cache_matches:
-            msg = (
-                f"Centrality cache signature mismatch for {cache_path}.\n"
-                f"Cached:  {cached_sig}\n"
-                f"Current: {current_sig}"
-            )
-            if strict_cache_check:
-                raise ValueError(msg)
-            warnings.warn(msg, RuntimeWarning)
-
-        return payload["centrality"]
-
-    # ---- Compute from scratch ----
-    G_u = _get_undirected_graph(road_graph)
-
-    if G_u.number_of_nodes() == 0:
-        raise ValueError("Road graph is empty; cannot compute centrality.")
-
-    if largest_component_only:
-        largest_cc_nodes = max(nx.connected_components(G_u), key=len)
-        G_work = G_u.subgraph(largest_cc_nodes).copy()
-    else:
-        G_work = G_u
-
-    centrality = nx.closeness_centrality(G_work, distance=distance_attr)
-
-    payload = {
-        "metric": "closeness_centrality",
-        "distance_attr": distance_attr,
-        "largest_component_only": largest_component_only,
-        "graph_signature": current_sig,
-        "num_centrality_nodes": len(centrality),
-        "centrality": centrality,
-    }
-
-    with cache_path.open("wb") as f:
-        pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-    return centrality
 
 
 def build_poi_spatial_descriptors(
     poi_df: pd.DataFrame,
     road_graph,
     config: SpatialEncodingConfig,
-    node_centrality: Optional[Mapping[int, float]] = None,
-    context_gdf: Optional[gpd.GeoDataFrame] = None,
 ) -> pd.DataFrame:
     """
     Build per-POI spatial descriptors for Module 2.
@@ -328,9 +193,6 @@ def build_poi_spatial_descriptors(
         OSMnx road graph.
     config:
         Spatial encoding configuration.
-    node_centrality:
-        Optional precomputed mapping {node_id -> centrality_value}.
-        If None, closeness centrality is computed internally.
     context_gdf:
         Optional GeoDataFrame for nearby OSM context features.
         Only used if config.use_urban_context=True.
@@ -338,7 +200,7 @@ def build_poi_spatial_descriptors(
     Returns
     -------
     descriptor_df:
-        DataFrame keyed by POI ID with region, density, centrality,
+        DataFrame keyed by POI ID with region, density
         nearest node, and optional urban context descriptors.
     """
     _validate_poi_columns(poi_df, config)
@@ -375,7 +237,7 @@ def build_poi_spatial_descriptors(
     density_counts = _compute_density_counts(
         poi_proj_gdf, radius_m=config.density_radius_m
     )
-    descriptor_df["density_count_500m"] = density_counts.values
+    descriptor_df["density_count"] = density_counts.values
     descriptor_df["density_bin"] = _rank_bin(
         density_counts,
         prefix=config.density_prefix,
@@ -388,6 +250,10 @@ def build_poi_spatial_descriptors(
     nearest_nodes = _map_pois_to_nearest_graph_nodes(poi_gdf_wgs84, road_graph)
     descriptor_df["nearest_graph_node_id"] = nearest_nodes.values
     cprint("POIs nearest road-graph node acquired.", "green")
+    
+    degree = dict(road_graph.degree(weight=None))
+    descriptor_df["node_degree"] = nearest_nodes.map(degree)
+    descriptor_df["connectivity_bin"] = _rank_bin(descriptor_df["node_degree"], config.connectivity_prefix, config.connectivity_num_bins)
 
     # 5) Keep a clean output schema
     keep_cols = [
@@ -396,9 +262,11 @@ def build_poi_spatial_descriptors(
         config.lon_col,
         "region_coarse_token",
         "region_fine_token",
-        "density_count_500m",
+        "density_count",
         "density_bin",
         "nearest_graph_node_id",
+        "node_degree",
+        "connectivity_bin",
     ]
 
     descriptor_df = descriptor_df[keep_cols].copy()
@@ -406,65 +274,6 @@ def build_poi_spatial_descriptors(
     # Defensive uniqueness check
     if descriptor_df[config.poi_id_col].duplicated().any():
         dup_count = descriptor_df[config.poi_id_col].duplicated().sum()
-        raise ValueError(
-            f"POI ID column contains duplicates: {dup_count} duplicated rows found."
-        )
+        raise ValueError(f"POI ID column contains duplicates: {dup_count} duplicated rows found.")
 
     return descriptor_df
-
-
-# city = "NYC"
-# cprint(f"\nLoading {city} raw checkins data...", "yellow")
-# out_dir = Path(f"preprocessed_data/{city}")
-# checkins_df = pd.read_csv(out_dir / f"{city}.csv")
-# poi_df = checkins_df[["PId", "Latitude", "Longitude"]]
-# poi_df = poi_df.drop_duplicates(subset="PId")
-# print("Number of checkins:", len(checkins_df))
-# print("Number of unique POIs:", len(poi_df))
-# cprint("\nLoading complete.", "green")
-
-# cprint(f"\nLoading {city} road graph data...", "yellow")
-# osm = OSM(f"geo_data/{city.lower()}.osm.pbf")
-# nodes, edges = osm.get_network(nodes=True, network_type="walking")
-# G_drive = osm.to_graph(nodes, edges, graph_type="networkx")
-# cprint("\n Loading complete.", "green")
-
-# config = SpatialEncodingConfig(
-#     h3_res_coarse=8,
-#     h3_res_fine=9,
-#     density_radius_m=100.0,
-#     use_urban_context=False,  # keep off for now
-# )
-
-# cache_path = f"artifacts/spatial/{city.lower()}_node_closeness_centrality.pkl"
-
-# cprint("Started building POIs spatial descriptors...", "yellow")
-# poi_spatial_df = build_poi_spatial_descriptors(
-#     poi_df=poi_df,  # must contain POIId, Latitude, Longitude
-#     road_graph=G_drive,  # OSMnx graph
-#     config=config,
-#     node_centrality=None,  # or pass a cached dict if already computed
-#     context_gdf=None,
-# )
-# cprint("POIs spatial descriptors built successfully", "green")
-
-# poi_spatial_df.to_csv(
-#     Path(cache_path) / f"{city.lower()}_poi_spatial_descriptors_df.csv"
-# )
-
-# with Path(centrality_cache_path).parent / f"{city.lower()}_poi_spatial_descriptors_df"
-
-
-# poi_spatial_df.head()
-
-# config.topk_pair_neighbors = 200
-# config.road_distance_stretch_factor = 2.0
-# config.distance_bin_edges_m = (250, 500, 1000, 2000, 5000)
-
-# pair_transition_df = build_sparse_pair_transition_lookup(
-#     poi_df=poi_spatial_df,   # output from build_poi_spatial_descriptors(...)
-#     road_graph=G_drive,
-#     config=config,
-# )
-
-# pair_transition_df.head()

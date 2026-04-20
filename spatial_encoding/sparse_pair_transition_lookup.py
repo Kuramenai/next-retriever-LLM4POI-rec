@@ -197,6 +197,7 @@ def build_sparse_pair_transition_lookup(
         "direction_bin": [],
         "distance_bin": [],
         "distance_source": [],
+        "final_distance_m": [],
     }
 
     # fmt:off
@@ -238,6 +239,7 @@ def build_sparse_pair_transition_lookup(
         cols["bearing_deg"].extend(bearings_deg)
         cols["direction_bin"].extend(direction_bins)
         cols["distance_bin"].extend(distance_bins)
+        cols["final_distance_m"].extend(final_distance_m)
 
     pair_df = pd.DataFrame(cols)
 

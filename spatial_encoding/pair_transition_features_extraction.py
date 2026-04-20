@@ -62,10 +62,10 @@ def _ensure_pair_lookup_final_distance(
     if {
         "road_distance_m",
         "haversine_distance_m",
-        "used_scaled_haversine_fallback",
+        "used_haversine_fallbackk",
     }.issubset(df.columns):
         df["final_distance_m"] = np.where(
-            df["used_scaled_haversine_fallback"].astype(bool),
+            df["used_haversine_fallback"].astype(bool),
             df["haversine_distance_m"].astype(float) * float(road_distance_stretch_factor),
             df["road_distance_m"].astype(float),
         )
@@ -231,7 +231,7 @@ def build_observed_session_transition_descriptors(
         "distance_source",
         "road_distance_m",
         "haversine_distance_m",
-        "used_scaled_haversine_fallback",
+        "used_haversine_fallback",
     ]:
         if col in pair_lookup.columns:
             keep_pair_cols.append(col)
@@ -295,7 +295,7 @@ def build_observed_session_transition_descriptors(
             for col, default in [
                 ("haversine_distance_m", np.nan),
                 ("road_distance_m", np.nan),
-                ("used_scaled_haversine_fallback", False),
+                ("used_haversine_fallback", False),
                 ("distance_source", np.nan),
                 ("final_distance_m", np.nan),
                 ("bearing_deg", np.nan),
@@ -311,7 +311,7 @@ def build_observed_session_transition_descriptors(
             transition_df.loc[miss_idx, "bearing_deg"] = fallback_bearing_deg
             transition_df.loc[miss_idx, "direction_bin"] = fallback_direction_bin
             transition_df.loc[miss_idx, "distance_bin"] = fallback_distance_bin
-            transition_df.loc[miss_idx, "used_scaled_haversine_fallback"] = True
+            transition_df.loc[miss_idx, "used_haversine_fallback"] = True
             transition_df.loc[miss_idx, "distance_source"] = "offlookup_scaled_haversine"
 
     # ------------------------------------------------------------------
@@ -343,7 +343,7 @@ def build_observed_session_transition_descriptors(
     for extra_col in [
         "haversine_distance_m",
         "road_distance_m",
-        "used_scaled_haversine_fallback",
+        "used_haversine_fallback",
     ]:
         if extra_col in transition_df.columns:
             preferred_cols.append(extra_col)
