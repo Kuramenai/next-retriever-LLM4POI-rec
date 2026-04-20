@@ -1,23 +1,30 @@
+"""
+Session-level spatial token encoder.
+
+Consumes pre-computed transitions (from pair_transition_features_extraction)
+and per-POI descriptors. The encoder is a pure token assembler — no spatial
+math, no temporal binning, just dictionary lookups.
+
+Expected workflow:
+    1. build_all_session_transition_descriptors()  →  session_transitions_df
+    2. encode_session_spatial_tokens(checkins_df, poi_descriptor_df,
+                                     session_transitions_df, config)
+"""
+
 from __future__ import annotations
 
 from typing import Any
-import numpy as np
+
 import pandas as pd
 
-from spatial_encoding.sparse_pair_transition_lookup import (
-    _haversine_from_one_to_many_m,
-    _bearing_from_one_to_many_deg,
-    _bin_distances_m,
-    _bearing_deg_to_direction_bin,
-)
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _time_of_day_bin(ts: pd.Timestamp) -> str:
-    """
-    Four-way coarse time-of-day bin.
-    """
+    """Four-way coarse time-of-day bin."""
     hour = ts.hour
-
     if 5 <= hour < 12:
         return "morning"
     elif 12 <= hour < 17:
@@ -28,213 +35,201 @@ def _time_of_day_bin(ts: pd.Timestamp) -> str:
         return "late_night"
 
 
-def _gap_bin_minutes(gap_min: float, edges_min: tuple[float, ...]) -> str:
-    """
-    Fixed absolute binning for inter-check-in time gaps in minutes.
-    """
-    if pd.isna(gap_min):
-        return "BOS"
-
-    lower = 0
-    for edge in edges_min:
-        if gap_min <= edge:
-            return f"{int(lower)}-{int(edge)}min"
-        lower = edge
-
-    return f"{int(edges_min[-1])}+min"
-
-
 def _serialize_spatial_token(token: dict[str, Any]) -> str:
     """
-    Compact string serialization for debugging / prompt-side compression.
-    """
-    return (
-        f"T:{token['time_bin']}"
-        f"|CAT:{token['poi_category']}"
-        f"|R8:{token['region_coarse_token']}"
-        f"|R9:{token['region_fine_token']}"
-        f"|DIST:{token['distance_bin']}"
-        f"|DIR:{token['direction_bin']}"
-        f"|GAP:{token['gap_bin']}"
-        f"|DEN:{token['density_bin']}"
-    )
+    Compact string serialization for retrieval indexing and prompt compression.
 
+    NOTE: Update this if you add/remove token fields. If you need a separate
+    prompt-facing format (natural language summary), write a second serializer
+    rather than overloading this one.
+    """
+    parts = [
+        f"T:{token['time_bin']}",
+        f"CAT:{token['poi_category']}",
+        f"R8:{token['region_coarse_token']}",
+        f"R9:{token['region_fine_token']}",
+        f"DIST:{token['distance_bin']}",
+        f"DIR:{token['direction_bin']}",
+        f"GAP:{token['gap_bin']}",
+        f"DEN:{token['density_bin']}",
+        f"CONN:{token['connectivity_bin']}",
+    ]
+    return "|".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Main encoder
+# ---------------------------------------------------------------------------
 
 def encode_session_spatial_tokens(
     checkins_df: pd.DataFrame,
     poi_descriptor_df: pd.DataFrame,
-    pair_transition_df: pd.DataFrame,
+    session_transitions_df: pd.DataFrame,
     config,
 ) -> pd.DataFrame:
     """
     Encode each session into a sequence of spatial tokens.
 
-    Expected checkins_df columns
-    ----------------------------
-    - config.session_id_col
-    - config.poi_id_col
-    - config.timestamp_col
-    - config.category_col
+    All spatial and temporal features come from pre-computed lookups.
+    This function only reads from dicts — no haversine, no gap binning,
+    no pair-transition fallback.
 
-    Expected poi_descriptor_df columns
-    ----------------------------------
-    - config.poi_id_col
-    - region_coarse_token
-    - region_fine_token
-    - density_bin
-    - Latitude / Longitude (via config.lat_col / config.lon_col) for fallback bearing/haversine
+    Parameters
+    ----------
+    checkins_df : DataFrame
+        Raw check-ins. Required columns:
+        - config.session_id_col
+        - config.poi_id_col
+        - config.timestamp_col
+        - config.category_col
 
-    Expected pair_transition_df columns
-    -----------------------------------
-    - src_POIId
-    - dst_POIId
-    - distance_bin
-    - direction_bin
-    - haversine_distance_m
-    - bearing_deg
-    - used_haversine_fallback
+    poi_descriptor_df : DataFrame
+        Output of build_poi_spatial_descriptors(). Required columns:
+        - config.poi_id_col
+        - region_coarse_token, region_fine_token
+        - density_bin, connectivity_bin
+
+    session_transitions_df : DataFrame
+        Output of build_all_session_transition_descriptors() or
+        compute_single_session_transitions(). Required columns:
+        - config.session_id_col
+        - transition_index
+        - gap_bin, distance_bin, direction_bin
+
+    config : SpatialEncodingConfig
 
     Returns
     -------
-    session_tokens_df:
+    session_tokens_df : DataFrame
         One row per session with:
         - SessionId
         - n_steps
-        - poi_sequence
-        - spatial_token_sequence   (list[dict])
-        - spatial_token_sequence_text (list[str])
+        - poi_sequence            (list[poi_id])
+        - spatial_token_sequence  (list[dict])
+        - spatial_token_sequence_text  (list[str])
     """
+    # ------------------------------------------------------------------
+    # Validate check-in columns
+    # ------------------------------------------------------------------
     required_checkin_cols = [
         config.session_id_col,
         config.poi_id_col,
         config.timestamp_col,
         config.category_col,
     ]
-    missing_checkin_cols = [
-        c for c in required_checkin_cols if c not in checkins_df.columns
-    ]
-    if missing_checkin_cols:
-        raise ValueError(f"Missing required check-in columns: {missing_checkin_cols}")
+    missing = [c for c in required_checkin_cols if c not in checkins_df.columns]
+    if missing:
+        raise ValueError(f"Missing required check-in columns: {missing}")
 
-    # ---- Sort and normalize timestamps ----
-    df = checkins_df.copy()
-    df[config.timestamp_col] = pd.to_datetime(df[config.timestamp_col])
-    df = df.sort_values([config.session_id_col, config.timestamp_col]).reset_index(
-        drop=True
-    )
-
-    # ---- Build POI descriptor lookup ----
-    poi_required_cols = [
+    # ------------------------------------------------------------------
+    # Validate POI descriptor columns
+    # ------------------------------------------------------------------
+    poi_required = [
         config.poi_id_col,
         "region_coarse_token",
         "region_fine_token",
         "density_bin",
-        config.lat_col,
-        config.lon_col,
+        "connectivity_bin",
     ]
-    missing_poi_cols = [
-        c for c in poi_required_cols if c not in poi_descriptor_df.columns
-    ]
-    if missing_poi_cols:
-        raise ValueError(f"Missing required POI descriptor columns: {missing_poi_cols}")
+    missing_poi = [c for c in poi_required if c not in poi_descriptor_df.columns]
+    if missing_poi:
+        raise ValueError(f"Missing required POI descriptor columns: {missing_poi}")
 
-    poi_lookup = (
-        poi_descriptor_df[poi_required_cols]
+    # ------------------------------------------------------------------
+    # Validate transition columns
+    # ------------------------------------------------------------------
+    trans_required = [
+        config.session_id_col,
+        "transition_index",
+        "gap_bin",
+        "distance_bin",
+        "direction_bin",
+    ]
+    missing_trans = [c for c in trans_required if c not in session_transitions_df.columns]
+    if missing_trans:
+        raise ValueError(
+            f"Missing required transition columns: {missing_trans}. "
+            f"Did you pass the output of build_all_session_transition_descriptors()?"
+        )
+
+    # ------------------------------------------------------------------
+    # Sort checkins
+    # ------------------------------------------------------------------
+    df = checkins_df.copy()
+    df[config.timestamp_col] = pd.to_datetime(df[config.timestamp_col])
+    df = df.sort_values(
+        [config.session_id_col, config.timestamp_col]
+    ).reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # Build fast lookups
+    # ------------------------------------------------------------------
+    poi_lookup: dict = (
+        poi_descriptor_df[poi_required]
         .drop_duplicates(subset=[config.poi_id_col])
         .set_index(config.poi_id_col)
         .to_dict(orient="index")
     )
 
-    # ---- Build sparse pair lookup ----
-    pair_required_cols = [
-        "src_POIId",
-        "dst_POIId",
-        "distance_bin",
-        "direction_bin",
-    ]
-    missing_pair_cols = [
-        c for c in pair_required_cols if c not in pair_transition_df.columns
-    ]
-    if missing_pair_cols:
-        raise ValueError(f"Missing required pair lookup columns: {missing_pair_cols}")
-
-    pair_lookup = (
-        pair_transition_df.drop_duplicates(subset=["src_POIId", "dst_POIId"])
-        .set_index(["src_POIId", "dst_POIId"])[["distance_bin", "direction_bin"]]
+    # Key: (session_id, transition_index) → {gap_bin, distance_bin, direction_bin}
+    transition_lookup: dict = (
+        session_transitions_df[trans_required]
+        .drop_duplicates(
+            subset=[config.session_id_col, "transition_index"], keep="first"
+        )
+        .set_index([config.session_id_col, "transition_index"])
+        [["gap_bin", "distance_bin", "direction_bin"]]
         .to_dict(orient="index")
     )
 
-    session_records = []
+    # ------------------------------------------------------------------
+    # Encode sessions
+    # ------------------------------------------------------------------
+    session_records: list[dict] = []
 
     for session_id, session_df in df.groupby(config.session_id_col, sort=False):
-        session_df = session_df.sort_values(config.timestamp_col).reset_index(drop=True)
+        session_df = session_df.sort_values(config.timestamp_col).reset_index(
+            drop=True
+        )
 
-        poi_sequence = session_df[config.poi_id_col].tolist()
-        token_sequence = []
-        token_sequence_text = []
+        poi_sequence: list = []
+        token_sequence: list[dict] = []
+        token_sequence_text: list[str] = []
 
-        for idx, row in session_df.iterrows():
+        for pos in range(len(session_df)):
+            row = session_df.iloc[pos]
             curr_poi = row[config.poi_id_col]
             curr_ts = row[config.timestamp_col]
             curr_cat = row[config.category_col]
 
-            if curr_poi not in poi_lookup:
+            # ---- POI descriptor ----
+            poi_desc = poi_lookup.get(curr_poi)
+            if poi_desc is None:
                 raise KeyError(
-                    f"POI {curr_poi} from session {session_id} is missing in poi_descriptor_df."
+                    f"POI {curr_poi} (session {session_id}, position {pos}) "
+                    f"is missing in poi_descriptor_df."
                 )
 
-            poi_desc = poi_lookup[curr_poi]
-
-            # ---- Incoming edge features ----
-            if idx == 0:
+            # ---- Transition features ----
+            if pos == 0:
+                gap_bin = "BOS"
                 distance_bin = "BOS"
                 direction_bin = "BOS"
-                gap_bin = "BOS"
             else:
-                prev_row = session_df.iloc[idx - 1]
-                prev_poi = prev_row[config.poi_id_col]
-                prev_ts = prev_row[config.timestamp_col]
+                trans_key = (session_id, pos - 1)
+                trans = transition_lookup.get(trans_key)
+                if trans is None:
+                    raise KeyError(
+                        f"Missing pre-computed transition for "
+                        f"session={session_id}, transition_index={pos - 1}. "
+                        f"Ensure session_transitions_df covers all sessions "
+                        f"in checkins_df."
+                    )
+                gap_bin = trans["gap_bin"]
+                distance_bin = trans["distance_bin"]
+                direction_bin = trans["direction_bin"]
 
-                gap_min = (curr_ts - prev_ts).total_seconds() / 60.0
-                gap_bin = _gap_bin_minutes(gap_min, tuple(config.gap_bin_edges_min))
-
-                pair_key = (prev_poi, curr_poi)
-                pair_desc = pair_lookup.get(pair_key, None)
-
-                if pair_desc is not None:
-                    distance_bin = pair_desc["distance_bin"]
-                    direction_bin = pair_desc["direction_bin"]
-                else:
-                    # Fallback if sparse pair lookup misses this transition
-                    prev_desc = poi_lookup.get(prev_poi)
-                    if prev_desc is None:
-                        raise KeyError(
-                            f"Previous POI {prev_poi} from session {session_id} "
-                            f"is missing in poi_descriptor_df."
-                        )
-
-                    fallback_dist_m = _haversine_from_one_to_many_m(
-                        lat1=float(prev_desc[config.lat_col]),
-                        lon1=float(prev_desc[config.lon_col]),
-                        lats2=np.array([float(poi_desc[config.lat_col])]),
-                        lons2=np.array([float(poi_desc[config.lon_col])]),
-                    )[0]
-
-                    fallback_bearing_deg = _bearing_from_one_to_many_deg(
-                        lat1=float(prev_desc[config.lat_col]),
-                        lon1=float(prev_desc[config.lon_col]),
-                        lats2=np.array([float(poi_desc[config.lat_col])]),
-                        lons2=np.array([float(poi_desc[config.lon_col])]),
-                    )[0]
-
-                    distance_bin = _bin_distances_m(
-                        np.array([fallback_dist_m]),
-                        edges_m=tuple(config.distance_bin_edges_m),
-                    )[0]
-                    direction_bin = _bearing_deg_to_direction_bin(
-                        np.array([fallback_bearing_deg])
-                    )[0]
-
+            # ---- Assemble token ----
             token = {
                 "time_bin": _time_of_day_bin(curr_ts),
                 "poi_category": curr_cat,
@@ -244,8 +239,10 @@ def encode_session_spatial_tokens(
                 "direction_bin": direction_bin,
                 "gap_bin": gap_bin,
                 "density_bin": poi_desc["density_bin"],
+                "connectivity_bin": poi_desc["connectivity_bin"],
             }
 
+            poi_sequence.append(curr_poi)
             token_sequence.append(token)
             token_sequence_text.append(_serialize_spatial_token(token))
 
@@ -259,15 +256,4 @@ def encode_session_spatial_tokens(
             }
         )
 
-    session_tokens_df = pd.DataFrame(session_records)
-    return session_tokens_df
-
-
-# session_tokens_df = encode_session_spatial_tokens(
-#     checkins_df=checkins_df,
-#     poi_descriptor_df=poi_spatial_df,
-#     pair_transition_df=pair_transition_df,
-#     config=config,
-# )
-
-# session_tokens_df.head()
+    return pd.DataFrame(session_records)

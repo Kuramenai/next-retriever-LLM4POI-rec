@@ -1,48 +1,81 @@
+"""
+Online encoder for a single partial session (prefix).
+
+Computes transitions on-the-fly using compute_single_session_transitions(),
+then delegates to the standard session encoder.
+
+Typical usage at inference time:
+    encoded = encode_partial_session_online(
+        partial_session_df=current_prefix_df,
+        poi_descriptor_df=poi_spatial_df,
+        pair_lookup_df=pair_transition_df,   # sparse static lookup
+        poi_df=poi_df,                       # for haversine fallback coords
+        config=config,
+    )
+"""
+
 from __future__ import annotations
 
 from typing import Any
+
 import pandas as pd
 
-from spatial_encoding.sessions_spatial_tokens_encoder import encode_session_spatial_tokens
+from spatial_encoding.pair_transition_features_extraction import (
+    compute_single_session_transitions,
+    build_pair_lookup_dict,
+    build_poi_coord_map,
+)
+from spatial_encoding.sessions_spatial_tokens_encoder import (
+    encode_session_spatial_tokens,
+)
 
 
 def encode_partial_session_online(
     partial_session_df: pd.DataFrame,
     poi_descriptor_df: pd.DataFrame,
-    pair_transition_df: pd.DataFrame,
+    pair_lookup_df: pd.DataFrame,
+    poi_df: pd.DataFrame,
     config,
     *,
     session_id: Any = "__ONLINE_SESSION__",
+    _pair_lookup: dict | None = None,
+    _poi_coord_map: dict | None = None,
 ) -> dict:
     """
     Encode one observed partial session (prefix) into a spatial token sequence.
 
     Parameters
     ----------
-    partial_session_df:
-        DataFrame containing the observed check-ins for a single partial session.
-        Expected columns:
-        - config.poi_id_col
-        - config.timestamp_col
-        - config.category_col
-        - config.session_id_col (optional; will be added if missing)
+    partial_session_df : DataFrame
+        Observed check-ins for a single partial session.
+        Required columns: config.poi_id_col, config.timestamp_col,
+                          config.category_col.
 
-    poi_descriptor_df:
-        Output of build_poi_spatial_descriptors(...)
+    poi_descriptor_df : DataFrame
+        Output of build_poi_spatial_descriptors().
 
-    pair_transition_df:
-        Output of build_sparse_pair_transition_lookup(...)
+    pair_lookup_df : DataFrame
+        Output of build_sparse_pair_transition_lookup() (static pairwise spatial data).
 
-    config:
-        SpatialEncodingConfig
+    poi_df : DataFrame
+        POI table with at least poi_id, lat, lon.
+        Used for haversine fallback when a pair is not in the sparse lookup.
 
-    session_id:
-        Temporary session ID used when partial_session_df does not already contain one.
+    config : SpatialEncodingConfig
+
+    session_id : optional
+        Override session ID.
+
+    _pair_lookup : dict, optional
+        Pre-built pair lookup dict. If provided, pair_lookup_df is ignored.
+        Use this to avoid rebuilding the dict on every call in a serving loop.
+
+    _poi_coord_map : dict, optional
+        Pre-built POI coordinate map. Same rationale as _pair_lookup.
 
     Returns
     -------
-    encoded_prefix:
-        dict with fields:
+    dict with fields:
         - SessionId
         - n_steps
         - poi_sequence
@@ -62,55 +95,48 @@ def encode_partial_session_online(
     if missing:
         raise ValueError(f"Missing required columns in partial_session_df: {missing}")
 
+    # ---- Validate single session ----
     work_df = partial_session_df.copy()
 
-    # Ensure exactly one session identity
-    if config.session_id_col not in work_df.columns:
-        work_df[config.session_id_col] = session_id
-    else:
+    if config.session_id_col in work_df.columns:
         unique_sessions = work_df[config.session_id_col].dropna().unique()
         if len(unique_sessions) > 1:
             raise ValueError(
                 "partial_session_df contains multiple session IDs. "
                 "This encoder expects exactly one partial session."
             )
-        elif len(unique_sessions) == 0:
-            work_df[config.session_id_col] = session_id
+        if len(unique_sessions) == 1:
+            session_id = unique_sessions[0]
 
-    # Reuse the full session encoder
+    work_df[config.session_id_col] = session_id
+
+    # ---- Build lookup dicts (or reuse pre-built ones) ----
+    pair_lookup = _pair_lookup or build_pair_lookup_dict(pair_lookup_df)
+    poi_coord_map = _poi_coord_map or build_poi_coord_map(poi_df, config)
+
+    # ---- Compute transitions for this single session ----
+    session_transitions = compute_single_session_transitions(
+        session_df=work_df,
+        pair_lookup=pair_lookup,
+        poi_coord_map=poi_coord_map,
+        config=config,
+        session_id=session_id,
+    )
+
+    # ---- Encode ----
     encoded_df = encode_session_spatial_tokens(
         checkins_df=work_df,
         poi_descriptor_df=poi_descriptor_df,
-        pair_transition_df=pair_transition_df,
+        session_transitions_df=session_transitions,
         config=config,
     )
 
     if len(encoded_df) != 1:
         raise RuntimeError(
-            "encode_partial_session_online(...) expected exactly one encoded session "
+            f"encode_partial_session_online() expected exactly one encoded session "
             f"but got {len(encoded_df)}."
         )
 
     result = encoded_df.iloc[0].to_dict()
     result["last_observed_poi"] = result["poi_sequence"][-1]
-
     return result
-
-
-# encoded_prefix = encode_partial_session_online(
-#     partial_session_df=current_prefix_df,
-#     poi_descriptor_df=poi_spatial_df,
-#     pair_transition_df=pair_transition_df,
-#     config=config,
-# )
-
-# encoded_prefix["spatial_token_sequence_text"]
-
-# test_session_prefix_df = test_session_df.sort_values(config.timestamp_col).iloc[:-1].copy()
-
-# encoded_prefix = encode_partial_session_online(
-#     partial_session_df=test_session_prefix_df,
-#     poi_descriptor_df=poi_spatial_df,
-#     pair_transition_df=pair_transition_df,
-#     config=config,
-# )
