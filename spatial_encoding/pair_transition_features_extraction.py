@@ -321,12 +321,7 @@ def build_all_session_transition_descriptors(
 
 
 if __name__ == "__main__":
-    config = SpatialEncodingConfig(
-        h3_res_coarse=8,
-        h3_res_fine=9,
-        density_radius_m=100.0,
-        timestamp_col="UTCTimeOffset",
-    )
+    config = SpatialEncodingConfig()
 
     city = "tky"
     scrip_dir = Path(__file__).resolve().parent.parent
@@ -344,9 +339,7 @@ if __name__ == "__main__":
 
     checkins_df = pd.read_csv(scrip_dir / f"data/{city}/train_sample.csv")
 
-    pair_df = pd.read_csv(
-        scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv"
-    )
+    pair_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv")  # fmt:skip
 
     session_transition_df = build_all_session_transition_descriptors(
         checkins_df, pair_df, poi_df, config

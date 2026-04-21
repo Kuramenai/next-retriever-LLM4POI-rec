@@ -4,7 +4,6 @@ import pandas as pd
 from pathlib import Path
 from sklearn.mixture import GaussianMixture
 from features_extraction import build_feature_blocks
-from canonical_preprocess import write_csv
 from termcolor import cprint
 from tqdm import tqdm
 
@@ -19,9 +18,9 @@ def _top_m_from_proba(proba: np.ndarray, top_m: int) -> tuple[np.ndarray, np.nda
 
 
 def _build_assignment_table(
-        proba: np.ndarray,
-        meta: pd.DataFrame | None = None,
-        top_m: int = 3,
+    proba: np.ndarray,
+    meta: pd.DataFrame | None = None,
+    top_m: int = 3,
 ) -> pd.DataFrame:
     """
     Build a session-level routing table from posterior probabilities.
@@ -55,20 +54,20 @@ def _build_assignment_table(
 
 
 def fit_gmm_prototypes(
-        X_train: np.ndarray,
-        train_meta: pd.DataFrame | None = None,
-        X_val: np.ndarray | None = None,
-        val_meta: pd.DataFrame | None = None,
-        X_test: np.ndarray | None = None,
-        test_meta: pd.DataFrame | None = None,
-        *,
-        candidate_K: tuple[int, ...] = (10, 20, 30, 50),
-        candidate_covariance_types: tuple[str, ...] = ("diag", "full"),
-        top_m: int = 3,
-        n_init: int = 5,
-        max_iter: int = 300,
-        reg_covar: float = 1e-6,
-        random_state: int = 42,
+    X_train: np.ndarray,
+    train_meta: pd.DataFrame | None = None,
+    X_val: np.ndarray | None = None,
+    val_meta: pd.DataFrame | None = None,
+    X_test: np.ndarray | None = None,
+    test_meta: pd.DataFrame | None = None,
+    *,
+    candidate_K: tuple[int, ...] = (10, 20, 30, 50),
+    candidate_covariance_types: tuple[str, ...] = ("diag", "full"),
+    top_m: int = 3,
+    n_init: int = 5,
+    max_iter: int = 300,
+    reg_covar: float = 1e-6,
+    random_state: int = 42,
 ) -> dict:
     """
     Fit GMM prototypes with BIC-based model selection on training data.
@@ -105,10 +104,10 @@ def fit_gmm_prototypes(
     best_bic = np.inf
 
     for covariance_type in tqdm(
-            candidate_covariance_types,
-            dynamic_ncols=True,
-            total=len(candidate_covariance_types),
-            desc="Finding best covariance type",
+        candidate_covariance_types,
+        dynamic_ncols=True,
+        total=len(candidate_covariance_types),
+        desc="Finding best covariance type",
     ):
         for K in candidate_K:
             try:
@@ -320,7 +319,7 @@ if __name__ == "__main__":
     print(gmm_data["prototype_summary"].head())
 
     cprint("Saving GMM data", "yellow")
-    cache_path = Path(f"artifacts/{city.lower()}/{city.lower()}_gmm_cluster.pkl")
+    cache_path = Path(f"artifacts/{city}/{city}_gmm_cluster.pkl")
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     with cache_path.open("wb") as f:
         pickle.dump(gmm_data, f)

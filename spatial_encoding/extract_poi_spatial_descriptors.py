@@ -46,6 +46,7 @@ class SpatialEncodingConfig:
     distance_bin_edges_m: tuple = (250, 500, 1000, 2000, 5000)
 
     session_id_col: str = "pseudo_session_trajectory_id"
+    user_id_col: str = "UserId"
     timestamp_col: str = "UTCTimeOffset"
     category_col: str = "PoiCategoryName"
     gap_bin_edges_min: tuple = (15, 30, 60, 120, 240)

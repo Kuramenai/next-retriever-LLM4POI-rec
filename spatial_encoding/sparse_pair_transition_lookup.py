@@ -250,9 +250,7 @@ def build_sparse_pair_transition_lookup(
 
 
 if __name__ == "__main__":
-    config = SpatialEncodingConfig(
-        h3_res_coarse=8, h3_res_fine=9, density_radius_m=100.0, timestamp_col="Time"
-    )
+    config = SpatialEncodingConfig()
 
     city = "tky"
     scrip_dir = Path(__file__).resolve().parent.parent

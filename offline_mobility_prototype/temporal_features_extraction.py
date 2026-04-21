@@ -4,7 +4,7 @@ from typing import Dict, Tuple
 from pathlib import Path
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import normalize
-from canonical_preprocess import write_csv
+
 
 TIME_BINS = ("morning", "afternoon", "evening", "late_night")
 
@@ -131,7 +131,7 @@ def build_temporal_feature_matrix(
     Batch extraction from session-level check-in traces.
     Expects columns: SessionId, Time, PId
     """
-    
+
     df = session_checkins_df.copy()
     df["Time"] = pd.to_datetime(df["UTCTimeOffset"])
     df = df.sort_values(["SessionId", "Time", "PId"]).reset_index(drop=True)
