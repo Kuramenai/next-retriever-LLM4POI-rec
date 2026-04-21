@@ -283,11 +283,6 @@ if __name__ == "__main__":
         train_checkins=train_checkins,
         val_checkins=val_checkins,
         test_checkins=test_checkins,
-        region_col=None,  # or "region_token" later
-        h3_resolution=7,
-        category_ngram_range=(1, 2),
-        category_svd_components=64,
-        random_state=42,
     )
 
     cprint("Feature blocks built successfully.", "green")
@@ -299,14 +294,7 @@ if __name__ == "__main__":
         X_val=feature_data["val"]["X"],
         val_meta=feature_data["val"]["meta"],
         X_test=feature_data["test"]["X"],
-        test_meta=feature_data["test"]["meta"],
-        candidate_K=(10, 20, 30, 50),
-        candidate_covariance_types=("diag", "full"),
-        top_m=3,
-        n_init=5,
-        max_iter=300,
-        reg_covar=1e-6,
-        random_state=42,
+        test_meta=feature_data["test"]["meta"]
     )
 
     cprint("GMM prototypes fitted successfully.", "green")
@@ -319,7 +307,14 @@ if __name__ == "__main__":
     print(gmm_data["prototype_summary"].head())
 
     cprint("Saving GMM data", "yellow")
-    cache_path = Path(f"artifacts/{city}/{city}_gmm_cluster.pkl")
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    with cache_path.open("wb") as f:
+    gmm_path = Path(f"artifacts/{city}/{city}_gmm_cluster.pkl")
+    gmm_path.parent.mkdir(parents=True, exist_ok=True)
+    with gmm_path.open("wb") as f:
         pickle.dump(gmm_data, f)
+    
+    cprint("Saving features", "yellow")
+    features_path = Path(f"artifacts/{city}/{city}_features.pkl")
+    features_path.parent.mkdir(parents=True, exist_ok=True)
+    with features_path.open("wb") as f:
+        pickle.dump(feature_data, f)
+        

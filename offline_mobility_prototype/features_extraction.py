@@ -46,7 +46,7 @@ def build_feature_blocks(
     test_checkins: pd.DataFrame,
     *,
     region_col: str | None = None,
-    h3_resolution: int = 7,
+    h3_resolution: int = 8,
     category_ngram_range: tuple[int, int] = (1, 2),
     category_svd_components: int | None = 64,
     random_state: int = 42,
