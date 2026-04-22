@@ -345,5 +345,25 @@ if __name__ == "__main__":
 
     cprint("Inference", "yellow")
     test_sample_df = pd.read_csv(scrip_dir / f"data/{city}/test_sample.csv")
-    prefix_df, gold_next = pipeline.build_test_query_from_full_session(test_sample_df)
-    out = pipeline.predict_next_poi_from_prefix(prefix_df)
+
+    # One session: slice a single SessionId, then predict last POI.
+    # sid = test_sample_df[config.session_id_col].iloc[0]
+    # one_session = test_sample_df[
+    #     test_sample_df[config.session_id_col] == sid
+    # ].copy()
+    # out = pipeline.predict_from_full_test_session(one_session)
+
+    # All sessions in test_sample_df (one next-step prediction per session).
+    batch_results = pipeline.predict_batch_from_test_checkins(
+        test_sample_df,
+        min_checkins=2,
+        include_details=False,
+        show_progress=True,
+    )
+    evaluated = batch_results.loc[~batch_results["skipped"] & batch_results["error"].isna()]
+    if len(evaluated) > 0:
+        acc = float(evaluated["is_correct_at_1"].mean())
+        cprint(f"Hit@1 over {len(evaluated)} sessions: {acc:.4f}", "green")
+    out_path = scrip_dir / f"artifacts/{city}/{city}_batch_inference_results.csv"
+    batch_results.to_csv(out_path, index=False)
+    cprint(f"Wrote batch results to {out_path}", "green")

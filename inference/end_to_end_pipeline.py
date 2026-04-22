@@ -209,6 +209,15 @@ class NextPOIEndToEndPipeline:
         )
         work = work.sort_values(config.timestamp_col).reset_index(drop=True)
 
+        if config.session_id_col in work.columns:
+            n_sessions = work[config.session_id_col].dropna().nunique()
+            if n_sessions > 1:
+                raise ValueError(
+                    f"full_session_df must contain one session only; found {n_sessions} "
+                    f"distinct {config.session_id_col!r}. Use "
+                    f"predict_batch_from_test_checkins(test_checkins_df) for the full test CSV."
+                )
+
         if len(work) < 2:
             raise ValueError("A test session must contain at least 2 check-ins.")
 
@@ -384,6 +393,112 @@ class NextPOIEndToEndPipeline:
         pred["gold_next_poi_id"] = gold_next[self.assets.config.poi_id_col]
         pred["is_correct_at_1"] = pred["selected_poi_id"] == pred["gold_next_poi_id"]
         return pred
+
+    def predict_batch_from_test_checkins(
+        self,
+        test_checkins_df: pd.DataFrame,
+        *,
+        min_checkins: int = 2,
+        include_details: bool = False,
+        show_progress: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Run next-POI prediction once per session in a long check-in table.
+
+        ``test_checkins_df`` must contain ``config.session_id_col`` and
+        ``config.timestamp_col`` (same schema as training check-ins). Rows are
+        grouped by session, sorted by time, then the last check-in is held out
+        as the label (same contract as ``predict_from_full_test_session``).
+
+        Parameters
+        ----------
+        test_checkins_df
+            All test sessions concatenated (one row per check-in).
+        min_checkins
+            Sessions with fewer rows are recorded as ``skipped=True`` (no API call).
+        include_details
+            If True, adds an ``llm_raw_text`` column per session (can be large).
+        show_progress
+            If True and ``tqdm`` is installed, show a progress bar over sessions.
+
+        Returns
+        -------
+        DataFrame with one row per session: session id, gold/selected ids,
+        ``is_correct_at_1``, ``skipped``, ``n_checkins``, optional ``error``.
+        """
+        try:
+            from tqdm import tqdm
+        except ImportError:
+            tqdm = None  # type: ignore[assignment]
+
+        config = self.assets.config
+        sid_col = config.session_id_col
+        ts_col = config.timestamp_col
+
+        if sid_col not in test_checkins_df.columns:
+            raise ValueError(
+                f"test_checkins_df must contain session column {sid_col!r} "
+                "(set config.session_id_col to match your CSV)."
+            )
+        if ts_col not in test_checkins_df.columns:
+            raise ValueError(
+                f"test_checkins_df must contain timestamp column {ts_col!r} "
+                "(set config.timestamp_col to match your CSV)."
+            )
+
+        work = test_checkins_df.copy()
+        work[ts_col] = pd.to_datetime(work[ts_col], errors="coerce")
+        groups = work.sort_values([sid_col, ts_col]).groupby(sid_col, sort=False)
+
+        rows: list[dict[str, Any]] = []
+        it = groups
+        if show_progress and tqdm is not None:
+            it = tqdm(groups, desc="test sessions", unit="session")
+
+        for session_id, session_df in it:
+            session_df = session_df.reset_index(drop=True)
+            if len(session_df) < min_checkins:
+                rows.append(
+                    {
+                        sid_col: session_id,
+                        "skipped": True,
+                        "n_checkins": int(len(session_df)),
+                        "gold_next_poi_id": None,
+                        "selected_poi_id": None,
+                        "is_correct_at_1": None,
+                        "error": f"fewer than {min_checkins} check-ins",
+                    }
+                )
+                continue
+
+            try:
+                pred = self.predict_from_full_test_session(session_df)
+                rec: dict[str, Any] = {
+                    sid_col: session_id,
+                    "skipped": False,
+                    "n_checkins": int(len(session_df)),
+                    "gold_next_poi_id": pred["gold_next_poi_id"],
+                    "selected_poi_id": pred["selected_poi_id"],
+                    "is_correct_at_1": bool(pred["is_correct_at_1"]),
+                    "error": None,
+                }
+                if include_details:
+                    rec["llm_raw_text"] = pred.get("llm_raw_text", "")
+                rows.append(rec)
+            except Exception as e:
+                rows.append(
+                    {
+                        sid_col: session_id,
+                        "skipped": False,
+                        "n_checkins": int(len(session_df)),
+                        "gold_next_poi_id": None,
+                        "selected_poi_id": None,
+                        "is_correct_at_1": None,
+                        "error": repr(e),
+                    }
+                )
+
+        return pd.DataFrame(rows)
 
 
 if __name__ == "__main__":
