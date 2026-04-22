@@ -11,6 +11,7 @@ from termcolor import cprint
 
 # sys.path.append(os.path.abspath("/root/autodl-tmp/next-retriever-LLM4POI-rec"))
 from spatial_encoding.retrieve_decisions_states import DecisionStateEncoder
+from spatial_encoding.retrieve_decisions_states import build_retrieval_index
 from spatial_encoding.extract_poi_spatial_descriptors import SpatialEncodingConfig
 from offline_mobility_prototype.prefix_feature_transformer import (
     FrozenModule1PrefixTransformer,
@@ -358,9 +359,15 @@ if __name__ == "__main__":
 
     # with open(scrip_dir / f"artifacts/{city}/{city}_case_encoder.pkl", "rb") as f:
     #     encoder = pickle.load(f)
-    encoder = DecisionStateEncoder(config, recent_k=3)
+    encoder = DecisionStateEncoder(config)
     case_vectors, case_coords = build_retrieval_caches(
         decision_state_case_base_df, encoder
+    )
+    retrieval_index = build_retrieval_index(
+        case_base_df=decision_state_case_base_df,
+        case_vectors=case_vectors,
+        case_coords=case_coords,
+        config=config,
     )
 
     prototype_router = Module1PrototypeRouter(
@@ -379,6 +386,7 @@ if __name__ == "__main__":
         decision_state_encoder=encoder,
         decision_state_case_vectors=case_vectors,
         decision_state_case_coords=case_coords,  # <-- add this for spatial kernel speed
+        decision_state_retrieval_index=retrieval_index,  # <-- big retrieval speedup
         prototype_router=prototype_router,  # optional
         prototype_caption_map=None,  # optional
         pair_lookup_dict=None,  # optional (perf)

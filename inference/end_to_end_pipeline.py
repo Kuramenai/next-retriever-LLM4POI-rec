@@ -166,6 +166,7 @@ class EndToEndAssets:
     decision_state_encoder: object
     decision_state_case_vectors: object
     decision_state_case_coords: Optional[object] = None
+    decision_state_retrieval_index: Optional[object] = None
 
     # Optional Module 1 router
     prototype_router: Optional[object] = None
@@ -270,6 +271,7 @@ class NextPOIEndToEndPipeline:
             query_state=current_state_df,
             case_base_df=self.assets.decision_state_case_base_df,
             encoder=self.assets.decision_state_encoder,
+            retrieval_index=self.assets.decision_state_retrieval_index,
             case_vectors=self.assets.decision_state_case_vectors,
             case_coords=self.assets.decision_state_case_coords,
             config=self.assets.config,
