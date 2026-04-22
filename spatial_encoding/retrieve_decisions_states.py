@@ -142,6 +142,27 @@ def _haversine_one_to_many_m(
     return EARTH_RADIUS_M * c
 
 
+def _haversine_one_to_many_m_from_radians(
+    lat1_r: float,
+    lon1_r: float,
+    lats2_r: np.ndarray,
+    lons2_r: np.ndarray,
+) -> np.ndarray:
+    """
+    Haversine distance in meters from one point to an array of points,
+    with all inputs already in radians.
+    """
+    dlat = lats2_r - lat1_r
+    dlon = lons2_r - lon1_r
+
+    a = (
+        np.sin(dlat / 2.0) ** 2
+        + np.cos(lat1_r) * np.cos(lats2_r) * np.sin(dlon / 2.0) ** 2
+    )
+    c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
+    return EARTH_RADIUS_M * c
+
+
 # ---------------------------------------------------------------------------
 # Encoder (non-spatial blocks only)
 # ---------------------------------------------------------------------------
@@ -431,6 +452,7 @@ class DecisionStateRetrievalIndex:
     case_base_df: pd.DataFrame
     case_vectors_unit: np.ndarray
     case_coords: Optional[np.ndarray]
+    case_coords_rad: Optional[np.ndarray]
     session_ids: np.ndarray
     prototype_ids: np.ndarray
     all_idx: np.ndarray
@@ -481,17 +503,22 @@ def build_retrieval_index(
             prototype_to_indices[int(p)] = np.flatnonzero(prototype_ids == p)
 
     coords_arr: Optional[np.ndarray]
+    coords_rad: Optional[np.ndarray]
     if case_coords is None:
         coords_arr = None
+        coords_rad = None
     else:
         coords_arr = np.asarray(case_coords, dtype=np.float32)
         if coords_arr.shape != (len(case_base_df), 2):
             raise ValueError(f"case_coords must have shape (N,2); got {coords_arr.shape}.")
+        # Precompute radians once to avoid per-query np.radians over large arrays
+        coords_rad = np.radians(coords_arr.astype(np.float64)).astype(np.float32)
 
     return DecisionStateRetrievalIndex(
         case_base_df=case_base_df,
         case_vectors_unit=mat_unit,
         case_coords=coords_arr,
+        case_coords_rad=coords_rad,
         session_ids=session_ids,
         prototype_ids=prototype_ids,
         all_idx=all_idx,
@@ -629,10 +656,19 @@ def retrieve_similar_decision_states(
         if idx.case_coords is None or np.isnan(query_lat) or np.isnan(query_lon):
             spatial_scores = np.zeros(len(cand_idx), dtype=np.float32)
         else:
-            coords = idx.case_coords[cand_idx]
-            distances_m = _haversine_one_to_many_m(
-                query_lat, query_lon, coords[:, 0], coords[:, 1]
-            )
+            # Prefer precomputed radians to avoid per-query np.radians over candidate arrays
+            if idx.case_coords_rad is not None:
+                coords_r = idx.case_coords_rad[cand_idx]
+                lat1_r = float(np.radians(query_lat))
+                lon1_r = float(np.radians(query_lon))
+                distances_m = _haversine_one_to_many_m_from_radians(
+                    lat1_r, lon1_r, coords_r[:, 0], coords_r[:, 1]
+                )
+            else:
+                coords = idx.case_coords[cand_idx]
+                distances_m = _haversine_one_to_many_m(
+                    query_lat, query_lon, coords[:, 0], coords[:, 1]
+                )
             tau = float(encoder.spatial_kernel.tau_m)
             spatial_scores = np.exp(-distances_m / tau).astype(np.float32)
             spatial_scores = np.where(np.isnan(spatial_scores), 0.0, spatial_scores)
