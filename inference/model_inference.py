@@ -246,6 +246,61 @@ def make_vllm_generate_fn(
     return generate
 
 
+def make_vllm_batch_generate_fn(
+    llm: LLM,
+    *,
+    temperature: float = 0.2,
+    max_tokens: int = 1024,
+    enable_thinking: bool = False,
+) -> Callable[[list[str], list[str]], list[str]]:
+    """
+    Build ``llm_batch_generate_fn(system_prompts, user_prompts) -> list[str]`` using vLLM.
+
+    This formats each (system,user) pair using the tokenizer chat template (when available),
+    then calls one batched ``llm.generate([...])``.
+    """
+    tokenizer = llm.get_tokenizer()
+
+    def batch_generate(system_prompts: list[str], user_prompts: list[str]) -> list[str]:
+        if len(system_prompts) != len(user_prompts):
+            raise ValueError("system_prompts and user_prompts must have the same length.")
+        if len(system_prompts) == 0:
+            return []
+
+        prompts: list[str] = []
+        for sp, up in zip(system_prompts, user_prompts):
+            messages = [
+                {"role": "system", "content": sp},
+                {"role": "user", "content": up},
+            ]
+            if hasattr(tokenizer, "apply_chat_template"):
+                prompts.append(
+                    tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        enable_thinking=enable_thinking,
+                    )
+                )
+            else:
+                prompts.append(f"{sp}\n\n{up}")
+
+        sampling = SamplingParams(
+            temperature=float(temperature),
+            max_tokens=int(max_tokens),
+        )
+        outs = llm.generate(prompts, sampling)
+        texts: list[str] = []
+        for o in outs:
+            if not o.outputs:
+                texts.append("")
+            else:
+                texts.append(o.outputs[0].text.strip())
+        return texts
+
+    return batch_generate
+
+
 def build_retrieval_caches(
     decision_state_case_base_df: pd.DataFrame,
     encoder: DecisionStateEncoder,
@@ -279,8 +334,7 @@ if __name__ == "__main__":
     pair_lookup_df = pd.read_csv(
         scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv"
     )
-    # Labeled historical decision states (must include next_POIId). Do not use the
-    # pair-lookup table here — that CSV is src/dst pair geometry, not per-decision labels.
+
     decision_state_case_base_df = pd.read_csv(
         scrip_dir / f"artifacts/{city}/{city}_decision_state_table.csv"
     )
@@ -304,7 +358,7 @@ if __name__ == "__main__":
 
     # with open(scrip_dir / f"artifacts/{city}/{city}_case_encoder.pkl", "rb") as f:
     #     encoder = pickle.load(f)
-    encoder = DecisionStateEncoder(config, recent_k=2)
+    encoder = DecisionStateEncoder(config, recent_k=3)
     case_vectors, case_coords = build_retrieval_caches(
         decision_state_case_base_df, encoder
     )
@@ -333,13 +387,19 @@ if __name__ == "__main__":
 
     cprint("Launching VLLM", "yellow")
     model_path = "/root/autodl-tmp/hf-models/Qwen3-8B"
-    # llm_generate_fn = make_openai_chat_generate_fn()  # needs OPENAI_API_KEY
-    llm_generate_fn = make_vllm_generate_fn(model_path=model_path)
+    # Build a single shared vLLM engine.
+    llm = LLM(model=model_path, trust_remote_code=True)
+
+    # Single-prompt generation (works, but slower throughput)
+    # llm_generate_fn = make_vllm_generate_fn(model_path=model_path)
+
+    # Batched generation (recommended for speed)
+    llm_batch_generate_fn = make_vllm_batch_generate_fn(llm, temperature=0.2, max_tokens=1024)
     llm_parse_fn = parse_llm_selected_poi_id
 
     pipeline = NextPOIEndToEndPipeline(
         assets=assets,
-        llm_generate_fn=llm_generate_fn,
+        llm_generate_fn=stub_llm_generate_fn,  # unused in batched path below
         llm_parse_fn=llm_parse_fn,
     )
 
@@ -353,9 +413,11 @@ if __name__ == "__main__":
     # ].copy()
     # out = pipeline.predict_from_full_test_session(one_session)
 
-    # All sessions in test_sample_df (one next-step prediction per session).
-    batch_results = pipeline.predict_batch_from_test_checkins(
+    # All sessions in test_sample_df (one next-step prediction per session),
+    # batching the LLM decoding via vLLM.
+    batch_results, prompts_responses = pipeline.predict_batch_from_test_checkins_batched_llm(
         test_sample_df,
+        llm_batch_generate_fn=llm_batch_generate_fn,
         min_checkins=2,
         include_details=False,
         show_progress=True,
@@ -367,3 +429,8 @@ if __name__ == "__main__":
     out_path = scrip_dir / f"artifacts/{city}/{city}_batch_inference_results.csv"
     batch_results.to_csv(out_path, index=False)
     cprint(f"Wrote batch results to {out_path}", "green")
+    
+    cprint("Writing prompts and responses to file", "yellow")
+    out_path = scrip_dir / f"artifacts/{city}/{city}_batch_inference_prompts_responses.csv"
+    prompts_responses.to_csv(out_path, index=False)
+    cprint(f"Wrote prompts and responses to {out_path}", "green")

@@ -500,6 +500,162 @@ class NextPOIEndToEndPipeline:
 
         return pd.DataFrame(rows)
 
+    def predict_batch_from_test_checkins_batched_llm(
+        self,
+        test_checkins_df: pd.DataFrame,
+        *,
+        llm_batch_generate_fn: Callable[[list[str], list[str]], list[str]],
+        min_checkins: int = 2,
+        include_details: bool = False,
+        show_progress: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Batch version of ``predict_batch_from_test_checkins`` that batches *only*
+        the LLM generation step.
+
+        It first builds prompts (retrieval + candidates + evidence) per session,
+        then calls ``llm_batch_generate_fn(system_prompts, user_prompts)`` once.
+
+        This is particularly efficient with vLLM, which is optimized for batched
+        decoding.
+        """
+        try:
+            from tqdm import tqdm
+        except ImportError:
+            tqdm = None  # type: ignore[assignment]
+
+        config = self.assets.config
+        sid_col = config.session_id_col
+        ts_col = config.timestamp_col
+
+        if sid_col not in test_checkins_df.columns:
+            raise ValueError(
+                f"test_checkins_df must contain session column {sid_col!r} "
+                "(set config.session_id_col to match your CSV)."
+            )
+        if ts_col not in test_checkins_df.columns:
+            raise ValueError(
+                f"test_checkins_df must contain timestamp column {ts_col!r} "
+                "(set config.timestamp_col to match your CSV)."
+            )
+
+        work = test_checkins_df.copy()
+        work[ts_col] = pd.to_datetime(work[ts_col], errors="coerce")
+        groups = work.sort_values([sid_col, ts_col]).groupby(sid_col, sort=False)
+
+        # 1) Build prompts + metadata per session
+        session_rows: list[dict[str, Any]] = []
+        system_prompts: list[str] = []
+        user_prompts: list[str] = []
+        fallback_ids_list: list[list[Any]] = []
+
+        it = groups
+        if show_progress and tqdm is not None:
+            it = tqdm(groups, desc="build prompts", unit="session")
+
+        for session_id, session_df in it:
+            session_df = session_df.reset_index(drop=True)
+            if len(session_df) < min_checkins:
+                session_rows.append(
+                    {
+                        sid_col: session_id,
+                        "skipped": True,
+                        "n_checkins": int(len(session_df)),
+                        "gold_next_poi_id": None,
+                        "selected_poi_id": None,
+                        "is_correct_at_1": None,
+                        "error": f"fewer than {min_checkins} check-ins",
+                        "_needs_llm": False,
+                    }
+                )
+                continue
+
+            try:
+                prefix_df, gold_next = self.build_test_query_from_full_session(session_df)
+                prototype_signals = self.infer_prototype_signals(prefix_df)
+                current_state_df = self.build_current_state(
+                    prefix_df, prototype_signals=prototype_signals
+                )
+                retrieved_cases_df = self.retrieve_cases(current_state_df)
+                candidate_pois_df = self.aggregate_candidates(retrieved_cases_df)
+                prompt_payload = self.build_prompt_payload(
+                    prefix_df=prefix_df,
+                    current_state_df=current_state_df,
+                    retrieved_cases_df=retrieved_cases_df,
+                    candidate_pois_df=candidate_pois_df,
+                )
+
+                system_prompts.append(prompt_payload["system_prompt"])
+                user_prompts.append(prompt_payload["user_prompt"])
+
+                fallback_ids = candidate_pois_df["next_POIId"].tolist()
+                fallback_ids_list.append(fallback_ids)
+
+                session_rows.append(
+                    {
+                        sid_col: session_id,
+                        "skipped": False,
+                        "n_checkins": int(len(session_df)),
+                        "gold_next_poi_id": gold_next[self.assets.config.poi_id_col],
+                        "selected_poi_id": None,
+                        "is_correct_at_1": None,
+                        "error": None,
+                        "_needs_llm": True,
+                    }
+                )
+            except Exception as e:
+                session_rows.append(
+                    {
+                        sid_col: session_id,
+                        "skipped": False,
+                        "n_checkins": int(len(session_df)),
+                        "gold_next_poi_id": None,
+                        "selected_poi_id": None,
+                        "is_correct_at_1": None,
+                        "error": repr(e),
+                        "_needs_llm": False,
+                    }
+                )
+
+        # 2) Batched generation
+        if system_prompts:
+            llm_texts = llm_batch_generate_fn(system_prompts, user_prompts)
+            if len(llm_texts) != len(system_prompts):
+                raise RuntimeError(
+                    f"llm_batch_generate_fn returned {len(llm_texts)} outputs for "
+                    f"{len(system_prompts)} prompts."
+                )
+        else:
+            llm_texts = []
+
+        # 3) Parse outputs back into rows
+        out_rows: list[dict[str, Any]] = []
+        llm_i = 0
+        for rec in session_rows:
+            if not rec.pop("_needs_llm"):
+                out_rows.append({k: v for k, v in rec.items() if not k.startswith("_")})
+                continue
+
+            llm_text = llm_texts[llm_i]
+            fallback_ids = fallback_ids_list[llm_i]
+            llm_i += 1
+
+            try:
+                selected = self.llm_parse_fn(llm_text, fallback_ids)
+                rec["selected_poi_id"] = selected
+                gold = rec.get("gold_next_poi_id", None)
+                rec["is_correct_at_1"] = (selected == gold) if gold is not None else None
+                if include_details:
+                    rec["llm_raw_text"] = llm_text
+            except Exception as e:
+                rec["error"] = rec["error"] or repr(e)
+                if include_details:
+                    rec["llm_raw_text"] = llm_text
+
+            out_rows.append({k: v for k, v in rec.items() if not k.startswith("_")})
+
+        return pd.DataFrame(out_rows), pd.DataFrame({"user_prompt": user_prompts, "llm_responses": llm_texts}, columns=["user_prompt", "llm_responses"])
+
 
 if __name__ == "__main__":
     pass
