@@ -178,11 +178,12 @@ class EndToEndAssets:
 
     recent_k: int = 2
     top_k_return: int = 1
-    top_k_retrieved_cases: int = 50
-    top_k_candidates: int = 20
+    top_k_retrieved_cases: int = 20
+    top_k_candidates: int = 10
     max_recent_stops: int = 4
     max_evidence_cases: int = 3
     max_candidates: int = 5
+    prototype_union_k: int = 1
 
 
 class NextPOIEndToEndPipeline:
@@ -276,7 +277,8 @@ class NextPOIEndToEndPipeline:
             case_coords=self.assets.decision_state_case_coords,
             config=self.assets.config,
             top_k=self.assets.top_k_retrieved_cases,
-            same_prototype_only=True,
+            same_prototype_only=False,
+            prototype_union_k=self.assets.prototype_union_k,
             exclude_same_session=True,
         )
 

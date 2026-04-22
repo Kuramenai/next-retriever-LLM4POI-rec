@@ -514,6 +514,7 @@ def retrieve_similar_decision_states(
     case_coords: Optional[np.ndarray] = None,
     top_k: int = 50,
     same_prototype_only: bool = True,
+    prototype_union_k: int = 1,
     exclude_same_session: bool = True,
 ) -> pd.DataFrame:
     """
@@ -543,6 +544,12 @@ def retrieve_similar_decision_states(
         Pre-computed encoder.extract_coords(case_base_df). Shape (N, 2).
     top_k : int
     same_prototype_only : bool
+    prototype_union_k : int
+        If `same_prototype_only=True`, restrict retrieval to the union of the top-M
+        routed prototypes when the query contains `proto_top{i}_prototype_id`
+        fields (e.g. from `Module1PrototypeRouter`). If those fields are absent,
+        falls back to `proto_prototype_id`. Use 1 for hard top-1 routing (default),
+        3 for a common accuracy/speed trade-off.
     exclude_same_session : bool
 
     Returns
@@ -570,9 +577,34 @@ def retrieve_similar_decision_states(
 
         cand_idx = idx.all_idx
 
-        query_proto = q.get("proto_prototype_id", np.nan)
-        if same_prototype_only and pd.notna(query_proto):
-            cand_idx = idx.prototype_to_indices.get(int(query_proto), cand_idx)
+        # Prototype bucket(s): hard top-1 or union of top-M router outputs
+        if same_prototype_only:
+            union_k = max(int(prototype_union_k), 1)
+            proto_ids: list[int] = []
+
+            # Prefer router top-M outputs when available (proto_top{i}_prototype_id)
+            for i in range(1, union_k + 1):
+                v = q.get(f"proto_top{i}_prototype_id", np.nan)
+                if pd.notna(v):
+                    try:
+                        proto_ids.append(int(v))
+                    except Exception:
+                        pass
+
+            # Fallback to single routed prototype id
+            if not proto_ids:
+                v = q.get("proto_prototype_id", np.nan)
+                if pd.notna(v):
+                    try:
+                        proto_ids.append(int(v))
+                    except Exception:
+                        pass
+
+            if proto_ids:
+                buckets = [idx.prototype_to_indices.get(p) for p in dict.fromkeys(proto_ids)]
+                buckets = [b for b in buckets if b is not None and b.size > 0]
+                if buckets:
+                    cand_idx = np.unique(np.concatenate(buckets))
 
         if exclude_same_session and config.session_id_col in q.index:
             qsid = q[config.session_id_col]
@@ -639,11 +671,26 @@ def retrieve_similar_decision_states(
     if exclude_same_session and session_col in q.index and session_col in cands.columns:
         filter_mask &= cands[session_col] != q[session_col]
 
-    if same_prototype_only and proto_col in q.index and proto_col in cands.columns:
-        if pd.notna(q[proto_col]):
-            proto_match = cands[proto_col] == q[proto_col]
-            if proto_match.any():
-                filter_mask &= proto_match
+    if same_prototype_only and proto_col in cands.columns:
+        union_k = max(int(prototype_union_k), 1)
+        proto_vals: list[int] = []
+        for i in range(1, union_k + 1):
+            v = q.get(f"proto_top{i}_prototype_id", np.nan)
+            if pd.notna(v):
+                try:
+                    proto_vals.append(int(v))
+                except Exception:
+                    pass
+        if not proto_vals and proto_col in q.index and pd.notna(q[proto_col]):
+            try:
+                proto_vals.append(int(q[proto_col]))
+            except Exception:
+                proto_vals = []
+
+        if proto_vals:
+            proto_mask = cands[proto_col].isin(proto_vals)
+            if proto_mask.any():
+                filter_mask &= proto_mask
 
     filter_np = filter_mask.to_numpy()
     cands = cands.loc[filter_mask].copy()

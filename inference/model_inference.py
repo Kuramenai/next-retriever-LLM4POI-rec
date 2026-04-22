@@ -391,6 +391,7 @@ if __name__ == "__main__":
         prototype_caption_map=None,  # optional
         pair_lookup_dict=None,  # optional (perf)
         poi_coord_map=None,  # optional (perf)
+        prototype_union_k=3,  # retrieve over union of top-3 routed prototypes
     )
 
     cprint("Launching VLLM", "yellow")
