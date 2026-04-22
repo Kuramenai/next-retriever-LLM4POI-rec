@@ -37,7 +37,7 @@ def _format_candidate_list_for_prompt(
         poi_meta_df, ["Address", "address", "formatted_address", "PoiAddress"]
     )
     cat_col = _resolve_col(
-        poi_meta_df, ["CategoryName", "category", "PoiCategory", "VenueCategory"]
+        poi_meta_df, ["PoiCategoryName", "category", "PoiCategory", "VenueCategory"]
     )
 
     if poi_id_col is None:

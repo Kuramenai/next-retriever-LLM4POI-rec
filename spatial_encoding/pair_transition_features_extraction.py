@@ -29,6 +29,7 @@ from spatial_encoding.sparse_pair_transition_lookup import (
 # Temporal gap binning (canonical implementation — minutes format)
 # ---------------------------------------------------------------------------
 
+
 def _gap_bin_minutes(gap_min: float, edges_min: tuple[float, ...]) -> str:
     if pd.isna(gap_min):
         return "BOS"
@@ -43,6 +44,7 @@ def _gap_bin_minutes(gap_min: float, edges_min: tuple[float, ...]) -> str:
 # ---------------------------------------------------------------------------
 # Lookup-dict builders (called once, reused across sessions)
 # ---------------------------------------------------------------------------
+
 
 def build_pair_lookup_dict(
     pair_lookup_df: pd.DataFrame,
@@ -85,6 +87,7 @@ def build_poi_coord_map(
 # ---------------------------------------------------------------------------
 # Core: single-session transition computation
 # ---------------------------------------------------------------------------
+
 
 def compute_single_session_transitions(
     session_df: pd.DataFrame,
@@ -163,18 +166,14 @@ def compute_single_session_transitions(
 
         # Compute from coordinates if raw values missing
         needs_compute = (
-            np.isnan(final_distance_m)
-            or np.isnan(bearing_deg)
-            or distance_bin is None
+            np.isnan(final_distance_m) or np.isnan(bearing_deg) or distance_bin is None
         )
 
         if needs_compute:
             src_c = poi_coord_map.get(src_poi)
             dst_c = poi_coord_map.get(dst_poi)
             if src_c is None or dst_c is None:
-                raise KeyError(
-                    f"Missing coordinates for POI {src_poi} or {dst_poi}."
-                )
+                raise KeyError(f"Missing coordinates for POI {src_poi} or {dst_poi}.")
 
             hav_m = _haversine_from_one_to_many_m(
                 float(src_c[config.lat_col]),
@@ -198,9 +197,7 @@ def compute_single_session_transitions(
             distance_bin = _bin_distances_m(
                 np.array([final_distance_m]), edges_m=dist_edges_m
             )[0]
-            direction_bin = _bearing_deg_to_direction_bin(
-                np.array([bearing_deg])
-            )[0]
+            direction_bin = _bearing_deg_to_direction_bin(np.array([bearing_deg]))[0]
 
         records.append(
             {
@@ -223,6 +220,7 @@ def compute_single_session_transitions(
 # ---------------------------------------------------------------------------
 # Batch: all sessions
 # ---------------------------------------------------------------------------
+
 
 def build_all_session_transition_descriptors(
     checkins_df: pd.DataFrame,
@@ -250,12 +248,10 @@ def build_all_session_transition_descriptors(
     poi_coord_map = build_poi_coord_map(poi_df, config)
 
     df = checkins_df.copy()
-    df[config.timestamp_col] = pd.to_datetime(
-        df[config.timestamp_col], errors="coerce"
+    df[config.timestamp_col] = pd.to_datetime(df[config.timestamp_col], errors="coerce")
+    df = df.sort_values([config.session_id_col, config.timestamp_col]).reset_index(
+        drop=True
     )
-    df = df.sort_values(
-        [config.session_id_col, config.timestamp_col]
-    ).reset_index(drop=True)
 
     groups = df.groupby(config.session_id_col, sort=False)
     iterator = (
@@ -277,12 +273,19 @@ def build_all_session_transition_descriptors(
             all_transitions.append(t)
 
     if not all_transitions:
-        return pd.DataFrame(columns=[
-            config.session_id_col, "transition_index",
-            "src_POIId", "dst_POIId",
-            "gap_s", "gap_bin",
-            "final_distance_m", "distance_bin",
-            "bearing_deg", "direction_bin",
-        ])
+        return pd.DataFrame(
+            columns=[
+                config.session_id_col,
+                "transition_index",
+                "src_POIId",
+                "dst_POIId",
+                "gap_s",
+                "gap_bin",
+                "final_distance_m",
+                "distance_bin",
+                "bearing_deg",
+                "direction_bin",
+            ]
+        )
 
     return pd.concat(all_transitions, ignore_index=True)

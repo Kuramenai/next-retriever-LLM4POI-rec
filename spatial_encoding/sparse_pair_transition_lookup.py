@@ -11,9 +11,9 @@ import multiprocessing
 
 from tqdm import tqdm
 from termcolor import cprint
-from extract_poi_spatial_descriptors import SpatialEncodingConfig
+from spatial_encoding.extract_poi_spatial_descriptors import SpatialEncodingConfig
 
-from extract_poi_spatial_descriptors import (
+from spatial_encoding.extract_poi_spatial_descriptors import (
     _make_poi_gdf,
     _map_pois_to_nearest_graph_nodes,
     _get_undirected_graph,

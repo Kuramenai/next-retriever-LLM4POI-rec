@@ -22,17 +22,18 @@ from typing import Optional, Union
 
 import pickle
 from pathlib import Path
-
+import sys
+import os
 import numpy as np
 import pandas as pd
 from termcolor import cprint
 
-from pair_transition_features_extraction import (
+from spatial_encoding.pair_transition_features_extraction import (
     compute_single_session_transitions,
     build_pair_lookup_dict,
     build_poi_coord_map,
 )
-from extract_poi_spatial_descriptors import SpatialEncodingConfig
+from spatial_encoding.extract_poi_spatial_descriptors import SpatialEncodingConfig
 
 
 def _decision_time_bin(ts: pd.Timestamp) -> str:
@@ -52,11 +53,12 @@ def _decision_time_bin(ts: pd.Timestamp) -> str:
 # Shared helper: extract recent transition features for a decision point
 # ---------------------------------------------------------------------------
 
+
 def _extract_recent_transitions(
-    trans_index_df,       # transitions for this session, indexed by transition_index
+    trans_index_df,  # transitions for this session, indexed by transition_index
     current_checkin_pos,  # 0-based position of the current checkin in the session
     recent_k: int,
-    gap_col: str,         # "gap_bin" or "temporal_gap_bin"
+    gap_col: str,  # "gap_bin" or "temporal_gap_bin"
 ) -> dict:
     """
     Extract prev1_, prev2_, ... features for the decision point at
@@ -71,11 +73,7 @@ def _extract_recent_transitions(
         prefix = f"prev{lag}"
         tr_idx = (current_checkin_pos - 1) - (lag - 1)
 
-        if (
-            tr_idx < 0
-            or trans_index_df is None
-            or tr_idx not in trans_index_df.index
-        ):
+        if tr_idx < 0 or trans_index_df is None or tr_idx not in trans_index_df.index:
             # BOS sentinel for binned columns, NaN for raw
             rec[f"{prefix}_gap_bin"] = "BOS"
             rec[f"{prefix}_distance_bin"] = "BOS"
@@ -111,6 +109,7 @@ def _resolve_gap_col(columns) -> str:
 # Offline: build decision-state table from full training data
 # ---------------------------------------------------------------------------
 
+
 def build_decision_state_table(
     checkins_df: pd.DataFrame,
     poi_descriptor_df: pd.DataFrame,
@@ -143,7 +142,9 @@ def build_decision_state_table(
         raise ValueError(f"poi_descriptor_df must contain {config.poi_id_col!r}")
 
     if config.session_id_col not in session_transitions_df.columns:
-        raise ValueError(f"session_transitions_df must contain {config.session_id_col!r}")
+        raise ValueError(
+            f"session_transitions_df must contain {config.session_id_col!r}"
+        )
 
     if "transition_index" not in session_transitions_df.columns:
         raise ValueError("session_transitions_df must contain 'transition_index'")
@@ -209,9 +210,7 @@ def build_decision_state_table(
     # ------------------------------------------------------------------
     records = []
     has_user = hasattr(config, "user_id_col") and config.user_id_col in df.columns
-    has_category = (
-        hasattr(config, "category_col") and config.category_col in df.columns
-    )
+    has_category = hasattr(config, "category_col") and config.category_col in df.columns
 
     for session_id, sdf in df.groupby(config.session_id_col, sort=False):
         sdf = sdf.sort_values(config.timestamp_col).reset_index(drop=True)
@@ -311,6 +310,7 @@ def build_decision_state_table(
 # Helpers for online path
 # ---------------------------------------------------------------------------
 
+
 def _normalize_proto_signals(
     prototype_signals: Optional[Union[dict, pd.Series, pd.DataFrame]],
 ) -> dict:
@@ -322,9 +322,7 @@ def _normalize_proto_signals(
         return prototype_signals.to_dict()
     if isinstance(prototype_signals, pd.DataFrame):
         if len(prototype_signals) != 1:
-            raise ValueError(
-                "prototype_signals DataFrame must have exactly one row."
-            )
+            raise ValueError("prototype_signals DataFrame must have exactly one row.")
         return prototype_signals.iloc[0].to_dict()
     raise TypeError(
         "prototype_signals must be None, dict, pandas Series, or single-row DataFrame."
@@ -334,6 +332,7 @@ def _normalize_proto_signals(
 # ---------------------------------------------------------------------------
 # Online: build current decision state from a partial session
 # ---------------------------------------------------------------------------
+
 
 def build_current_decision_state(
     partial_session_df: pd.DataFrame,
@@ -372,16 +371,12 @@ def build_current_decision_state(
 
     if _pair_lookup is None:
         if pair_lookup_df is None:
-            raise ValueError(
-                "Provide either _pair_lookup or pair_lookup_df."
-            )
+            raise ValueError("Provide either _pair_lookup or pair_lookup_df.")
         _pair_lookup = build_pair_lookup_dict(pair_lookup_df)
 
     if _poi_coord_map is None:
         if poi_df is None:
-            raise ValueError(
-                "Provide either _poi_coord_map or poi_df."
-            )
+            raise ValueError("Provide either _poi_coord_map or poi_df.")
         _poi_coord_map = build_poi_coord_map(poi_df, config)
 
     df = partial_session_df.copy()
@@ -396,9 +391,7 @@ def build_current_decision_state(
     df = df.sort_values(config.timestamp_col).reset_index(drop=True)
 
     has_user = hasattr(config, "user_id_col") and config.user_id_col in df.columns
-    has_category = (
-        hasattr(config, "category_col") and config.category_col in df.columns
-    )
+    has_category = hasattr(config, "category_col") and config.category_col in df.columns
 
     # Build observed transitions on the prefix
     transition_df = compute_single_session_transitions(
@@ -436,8 +429,7 @@ def build_current_decision_state(
             (curr_ts - df.iloc[0][config.timestamp_col]).total_seconds() / 60.0
         ),
         "prefix_unique_poi_count": int(df[config.poi_id_col].nunique()),
-        "prefix_repeat_ratio": 1.0
-        - (df[config.poi_id_col].nunique() / float(len(df))),
+        "prefix_repeat_ratio": 1.0 - (df[config.poi_id_col].nunique() / float(len(df))),
     }
 
     if has_user:

@@ -258,7 +258,7 @@ if __name__ == "__main__":
     cprint("Starting GMM prototypes fitting...", "yellow")
     cprint("Loading check-in data...", "yellow")
 
-    city = "nyc"
+    city = "tky"
     out_dir = Path(f"data/{city}")
     train_checkins = pd.read_csv(out_dir / "train_sample.csv")
     val_checkins = pd.read_csv(out_dir / "validate_sample_with_traj.csv")
@@ -317,4 +317,3 @@ if __name__ == "__main__":
     features_path.parent.mkdir(parents=True, exist_ok=True)
     with features_path.open("wb") as f:
         pickle.dump(feature_data, f)
-        

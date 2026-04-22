@@ -1,5 +1,5 @@
-
 import os
+import sys
 import re
 import json
 import pickle
@@ -7,14 +7,26 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import pandas as pd
+from termcolor import cprint
 
+sys.path.append(os.path.abspath("/root/autodl-tmp/next-retriever-LLM4POI-rec"))
 from spatial_encoding.retrieve_decisions_states import DecisionStateEncoder
 from spatial_encoding.extract_poi_spatial_descriptors import SpatialEncodingConfig
-from offline_mobility_prototype.prefix_feature_transformer import FrozenModule1PrefixTransformer
-from inference.end_to_end_pipeline import EndToEndAssets, NextPOIEndToEndPipeline, Module1PrototypeRouter
+from offline_mobility_prototype.prefix_feature_transformer import (
+    FrozenModule1PrefixTransformer,
+)
+from end_to_end_pipeline import (
+    EndToEndAssets,
+    NextPOIEndToEndPipeline,
+    Module1PrototypeRouter,
+)
 
-
-
+try:
+    from vllm import LLM, SamplingParams  # type: ignore[import-not-found]
+except ImportError as e:
+    raise ImportError(
+        "vllm is required for make_vllm_generate_fn. Install with: pip install vllm"
+    ) from e
 
 
 def _extract_json_object(text: str) -> str:
@@ -148,10 +160,12 @@ def make_vllm_generate_fn(
     *,
     model_path: Optional[str] = None,
     temperature: float = 0.2,
-    max_tokens: int = 1024,
+    max_tokens: int = 512,
     trust_remote_code: bool = True,
     tensor_parallel_size: int = 1,
     dtype: str = "auto",
+    max_model_len: int = 32_768,
+    gpu_memory_utilization: int = 0.95,
     **llm_kwargs: Any,
 ) -> Callable[[str, str], str]:
     """
@@ -188,23 +202,15 @@ def make_vllm_generate_fn(
     use ``make_openai_chat_generate_fn(base_url="http://127.0.0.1:8000/v1", api_key="EMPTY", model="<served_model_id>")``
     instead (vLLM exposes an OpenAI-compatible HTTP API).
     """
-    try:
-        from vllm import LLM, SamplingParams  # type: ignore[import-not-found]
-    except ImportError as e:
-        raise ImportError(
-            "vllm is required for make_vllm_generate_fn. Install with: pip install vllm"
-        ) from e
 
-    resolved_path = (
-        model_path
-        or os.environ.get("VLLM_MODEL_PATH")
-        or "/root/autodl-tmp/hf-models/Qwen3-8B"
-    )
+    resolved_path = model_path
 
     engine_args: dict[str, Any] = {
         "model": resolved_path,
         "trust_remote_code": trust_remote_code,
         "tensor_parallel_size": int(tensor_parallel_size),
+        "gpu_memory_utilization": gpu_memory_utilization,
+        "max_model_len": max_model_len,
     }
     if dtype and str(dtype).lower() != "auto":
         engine_args["dtype"] = dtype
@@ -223,6 +229,7 @@ def make_vllm_generate_fn(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
+                enable_thinking=False,
             )
         else:
             prompt = f"{system_prompt}\n\n{user_prompt}"
@@ -255,30 +262,49 @@ def build_retrieval_caches(
     case_coords = encoder.extract_coords(decision_state_case_base_df)
     return case_vectors, case_coords
 
+
 if __name__ == "__main__":
     city = "nyc"
     scrip_dir = Path(__file__).resolve().parent.parent
     config = SpatialEncodingConfig()
-    
+
+    cprint("Loading artifacts", "yellow")
     with open(scrip_dir / f"artifacts/{city}/{city}_features.pkl", "rb") as f:
         features = pickle.load(f)
-        
+
+    poi_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi_meta.csv")
+    poi_descriptor_df = pd.read_csv(
+        scrip_dir / f"artifacts/{city}/{city}_poi_descriptor.csv"
+    )
+    pair_lookup_df = pd.read_csv(
+        scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv"
+    )
+    decision_state_case_base_df = pd.read_csv(
+        scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv"
+    )
+
+    cprint("Loading fitted GMM", "yellow")
     with open(scrip_dir / f"artifacts/{city}/{city}_gmm_cluster.pkl", "rb") as f:
         gmm = pickle.load(f)
-    fitted_gmm = gmm["best_model"]
-    
-    frozen_module1_transformer = FrozenModule1PrefixTransformer.from_feature_blocks_output(features)
+    fitted_gmm = gmm["model"]
+
+    cprint("Preparing online clustering", "yellow")
+    frozen_module1_transformer = (
+        FrozenModule1PrefixTransformer.from_feature_blocks_output(features)
+    )
 
     prototype_router = Module1PrototypeRouter(
         gmm_model=fitted_gmm,
         prefix_feature_transform_fn=frozen_module1_transformer.transform_prefix,  # see offline_mobility_prototype/prefix_feature_transformer.py
         feature_cols=frozen_module1_transformer.feature_cols,
-        session_id_col=config.session_id_col
+        session_id_col=config.session_id_col,
     )
 
-
+    cprint("Encoding decision states...", "yellow")
     encoder = DecisionStateEncoder(config, recent_k=2)
-    case_vectors, case_coords = build_retrieval_caches(decision_state_case_base_df, encoder)
+    case_vectors, case_coords = build_retrieval_caches(
+        decision_state_case_base_df, encoder
+    )
 
     assets = EndToEndAssets(
         config=config,
@@ -288,15 +314,17 @@ if __name__ == "__main__":
         decision_state_case_base_df=decision_state_case_base_df,
         decision_state_encoder=encoder,
         decision_state_case_vectors=case_vectors,
-        decision_state_case_coords=case_coords,   # <-- add this for spatial kernel speed
-        prototype_router=prototype_router,                    # optional
-        prototype_caption_map=None,               # optional
-        pair_lookup_dict=pair_lookup_dict,        # optional (perf)
-        poi_coord_map=poi_coord_map,              # optional (perf)
+        decision_state_case_coords=case_coords,  # <-- add this for spatial kernel speed
+        prototype_router=prototype_router,  # optional
+        prototype_caption_map=None,  # optional
+        pair_lookup_dict=None,  # optional (perf)
+        poi_coord_map=None,  # optional (perf)
     )
 
+    cprint("Launching VLLM", "yellow")
+    model_path = "/root/autodl-tmp/hf-models/Qwen3-8B"
     # llm_generate_fn = make_openai_chat_generate_fn()  # needs OPENAI_API_KEY
-    llm_generate_fn = make_vllm_generate_fn()  # local Qwen3-8B; optional: model_path=..., or VLLM_MODEL_PATH
+    llm_generate_fn = make_vllm_generate_fn(model_path=model_path)
     llm_parse_fn = parse_llm_selected_poi_id
 
     pipeline = NextPOIEndToEndPipeline(
@@ -304,8 +332,8 @@ if __name__ == "__main__":
         llm_generate_fn=llm_generate_fn,
         llm_parse_fn=llm_parse_fn,
     )
-    
-    
+
+    cprint("Inference", "yellow")
     test_sample_df = pd.read_csv(scrip_dir / f"data/{city}/test_sample.csv")
     prefix_df, gold_next = pipeline.build_test_query_from_full_session(test_sample_df)
     out = pipeline.predict_next_poi_from_prefix(prefix_df)
