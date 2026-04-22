@@ -11,21 +11,33 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
-from offline_mobility_prototype.prefix_feature_transformer import FrozenModule1PrefixTransformer
+from offline_mobility_prototype.prefix_feature_transformer import (
+    FrozenModule1PrefixTransformer,
+)
 
 from spatial_encoding.extract_poi_spatial_descriptors import SpatialEncodingConfig
 from spatial_encoding.retrieve_decisions_states import DecisionStateEncoder
 from spatial_encoding.session_decision_state_table import build_current_decision_state
 from spatial_encoding.retrieve_decisions_states import retrieve_similar_decision_states
-from spatial_encoding.retrieve_candidates_pois import aggregate_candidate_pois_from_retrieved_cases
+from spatial_encoding.retrieve_candidates_pois import (
+    aggregate_candidate_pois_from_retrieved_cases,
+)
 
-from prompt_construction.itinerary_summarization import build_prompt_ready_evidence_block
+from prompt_construction.itinerary_summarization import (
+    build_prompt_ready_evidence_block,
+)
 from prompt_construction.llm_prompt import build_llm_reranking_prompt
+
+from spatial_encoding.retrieve_decisions_states import RetrievalBlockWeights
+import __main__
+
+__main__.RetrievalBlockWeights = RetrievalBlockWeights
 
 
 # ---------------------------------------------------------------------------
 # LLM: generate + parse (wired into NextPOIEndToEndPipeline)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class Module1PrototypeRouter:
@@ -162,7 +174,6 @@ class EndToEndAssets:
     # Optional prebuilt online lookup helpers
     pair_lookup_dict: Optional[dict] = None
     poi_coord_map: Optional[dict] = None
-    
 
     recent_k: int = 2
     top_k_return: int = 1
@@ -171,7 +182,6 @@ class EndToEndAssets:
     max_recent_stops: int = 4
     max_evidence_cases: int = 3
     max_candidates: int = 5
-    
 
 
 class NextPOIEndToEndPipeline:
@@ -226,7 +236,6 @@ class NextPOIEndToEndPipeline:
         prefix_df: pd.DataFrame,
         prototype_signals: Optional[dict] = None,
     ) -> pd.DataFrame:
-        
 
         return build_current_decision_state(
             partial_session_df=prefix_df,
@@ -268,7 +277,6 @@ class NextPOIEndToEndPipeline:
         retrieved_cases_df: pd.DataFrame,
     ) -> pd.DataFrame:
 
-
         return aggregate_candidate_pois_from_retrieved_cases(
             retrieved_cases_df=retrieved_cases_df,
             top_k_candidates=self.assets.top_k_candidates,
@@ -285,7 +293,6 @@ class NextPOIEndToEndPipeline:
         retrieved_cases_df: pd.DataFrame,
         candidate_pois_df: pd.DataFrame,
     ) -> dict:
-
 
         q = current_state_df.iloc[0]
         proto_caption = None

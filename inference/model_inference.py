@@ -9,7 +9,7 @@ from typing import Any, Callable, Optional
 import pandas as pd
 from termcolor import cprint
 
-sys.path.append(os.path.abspath("/root/autodl-tmp/next-retriever-LLM4POI-rec"))
+# sys.path.append(os.path.abspath("/root/autodl-tmp/next-retriever-LLM4POI-rec"))
 from spatial_encoding.retrieve_decisions_states import DecisionStateEncoder
 from spatial_encoding.extract_poi_spatial_descriptors import SpatialEncodingConfig
 from offline_mobility_prototype.prefix_feature_transformer import (
@@ -293,17 +293,25 @@ if __name__ == "__main__":
         FrozenModule1PrefixTransformer.from_feature_blocks_output(features)
     )
 
+    cprint("Loading encoder, cases vectors and coords...", "yellow")
+    # with open(scrip_dir / f"artifacts/{city}/{city}_case_vectors.pkl", "rb") as f:
+    #     case_vectors = pickle.load(f)
+
+    # with open(scrip_dir / f"artifacts/{city}/{city}_case_coords.pkl", "rb") as f:
+    #     case_coords = pickle.load(f)
+
+    # with open(scrip_dir / f"artifacts/{city}/{city}_case_encoder.pkl", "rb") as f:
+    #     encoder = pickle.load(f)
+    encoder = DecisionStateEncoder(config, recent_k=2)
+    case_vectors, case_coords = build_retrieval_caches(
+        decision_state_case_base_df, encoder
+    )
+
     prototype_router = Module1PrototypeRouter(
         gmm_model=fitted_gmm,
         prefix_feature_transform_fn=frozen_module1_transformer.transform_prefix,  # see offline_mobility_prototype/prefix_feature_transformer.py
         feature_cols=frozen_module1_transformer.feature_cols,
         session_id_col=config.session_id_col,
-    )
-
-    cprint("Encoding decision states...", "yellow")
-    encoder = DecisionStateEncoder(config, recent_k=2)
-    case_vectors, case_coords = build_retrieval_caches(
-        decision_state_case_base_df, encoder
     )
 
     assets = EndToEndAssets(

@@ -472,7 +472,7 @@ def build_current_decision_state(
 
 if __name__ == "__main__":
     config = SpatialEncodingConfig()
-    city = "nyc"
+    city = "tky"
     scrip_dir = Path(__file__).resolve().parent.parent
 
     cprint(f"\nLoading {city} train checkins dataframe...", "yellow")

@@ -16,6 +16,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+from pathlib import Path
+from termcolor import cprint
 
 from spatial_encoding.sparse_pair_transition_lookup import (
     _haversine_from_one_to_many_m,
@@ -23,6 +25,8 @@ from spatial_encoding.sparse_pair_transition_lookup import (
     _bin_distances_m,
     _bearing_deg_to_direction_bin,
 )
+
+from spatial_encoding.extract_poi_spatial_descriptors import SpatialEncodingConfig
 
 
 # ---------------------------------------------------------------------------
@@ -289,3 +293,27 @@ def build_all_session_transition_descriptors(
         )
 
     return pd.concat(all_transitions, ignore_index=True)
+
+
+if __name__ == "__main__":
+    config = SpatialEncodingConfig()
+
+    city = "tky"
+    scrip_dir = Path(__file__).resolve().parent.parent
+
+    cprint(f"\nLoading {city} raw checkins data...", "yellow")
+    checkins_df = pd.read_csv(scrip_dir / f"data/{city}/sample.csv")
+    poi_df = checkins_df[["PoiId", "Latitude", "Longitude"]]
+    poi_df = poi_df.drop_duplicates(subset="PoiId")
+    print("Number of checkins:", len(checkins_df))
+    print("Number of unique POIs:", len(poi_df))
+
+    pair_lookup_df = pd.read_csv(
+        scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv"
+    )
+
+    session_transition_df = build_all_session_transition_descriptors(
+        checkins_df, pair_lookup_df, poi_df, config
+    )
+    cache_path = scrip_dir / f"artifacts/{city}/{city}_session_transition.csv"
+    session_transition_df.to_csv(cache_path)

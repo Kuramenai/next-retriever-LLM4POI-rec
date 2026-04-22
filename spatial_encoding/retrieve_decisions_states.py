@@ -32,9 +32,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Union
 
+import pickle
 import numpy as np
 import pandas as pd
+from pathlib import Path
+from termcolor import cprint
 from sklearn.preprocessing import StandardScaler
+from spatial_encoding.extract_poi_spatial_descriptors import SpatialEncodingConfig
 
 
 EARTH_RADIUS_M = 6_371_008.8
@@ -43,6 +47,7 @@ EARTH_RADIUS_M = 6_371_008.8
 # ---------------------------------------------------------------------------
 # Block weight configuration
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class RetrievalBlockWeights:
@@ -57,12 +62,12 @@ class RetrievalBlockWeights:
     Set to 0.0 to disable a block entirely.
     """
 
-    spatial: float = 3.0        # haversine proximity (not in the vector)
-    temporal: float = 1.5       # same time of day
+    spatial: float = 3.0  # haversine proximity (not in the vector)
+    temporal: float = 1.5  # same time of day
     local_context: float = 1.0  # similar neighborhood density/connectivity
-    movement: float = 2.0       # similar recent movement pattern
-    prefix_summary: float = 1.0 # similar session stage
-    category: float = 1.5       # same POI category at decision point
+    movement: float = 2.0  # similar recent movement pattern
+    prefix_summary: float = 1.0  # similar session stage
+    category: float = 1.5  # same POI category at decision point
 
     @property
     def non_spatial_total(self) -> float:
@@ -90,6 +95,7 @@ class RetrievalBlockWeights:
 # ---------------------------------------------------------------------------
 # Spatial distance kernel
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class SpatialKernelConfig:
@@ -139,6 +145,7 @@ def _haversine_one_to_many_m(
 # ---------------------------------------------------------------------------
 # Encoder (non-spatial blocks only)
 # ---------------------------------------------------------------------------
+
 
 class DecisionStateEncoder:
     """
@@ -224,9 +231,7 @@ class DecisionStateEncoder:
 
             dist_m = float(dist_m) if pd.notna(dist_m) else np.nan
             gap_s = float(gap_s) if pd.notna(gap_s) else np.nan
-            bearing_rad = (
-                np.radians(float(bearing)) if pd.notna(bearing) else np.nan
-            )
+            bearing_rad = np.radians(float(bearing)) if pd.notna(bearing) else np.nan
 
             parts.extend(
                 [
@@ -301,10 +306,10 @@ class DecisionStateEncoder:
 
         # Total non-spatial vector dimension
         self._dim = (
-            2                          # temporal
-            + 2                        # context
-            + movement_dim             # movement
-            + 4                        # prefix summary
+            2  # temporal
+            + 2  # context
+            + movement_dim  # movement
+            + 4  # prefix summary
             + len(self._category_vocab)  # category
         )
 
@@ -359,9 +364,7 @@ class DecisionStateEncoder:
 
         if isinstance(query_state, pd.DataFrame):
             if len(query_state) != 1:
-                raise ValueError(
-                    "query_state DataFrame must contain exactly one row."
-                )
+                raise ValueError("query_state DataFrame must contain exactly one row.")
             query_state = query_state.iloc[0]
         elif isinstance(query_state, dict):
             query_state = pd.Series(query_state)
@@ -413,6 +416,7 @@ class DecisionStateEncoder:
 # ---------------------------------------------------------------------------
 # Retrieval
 # ---------------------------------------------------------------------------
+
 
 def retrieve_similar_decision_states(
     query_state: Union[pd.Series, pd.DataFrame],
@@ -468,9 +472,7 @@ def retrieve_similar_decision_states(
     elif isinstance(query_state, pd.Series):
         q = query_state
     else:
-        raise TypeError(
-            "query_state must be a pandas Series or single-row DataFrame."
-        )
+        raise TypeError("query_state must be a pandas Series or single-row DataFrame.")
 
     cands = case_base_df.copy()
     if len(cands) == 0:
@@ -484,18 +486,10 @@ def retrieve_similar_decision_states(
 
     filter_mask = pd.Series(True, index=cands.index)
 
-    if (
-        exclude_same_session
-        and session_col in q.index
-        and session_col in cands.columns
-    ):
+    if exclude_same_session and session_col in q.index and session_col in cands.columns:
         filter_mask &= cands[session_col] != q[session_col]
 
-    if (
-        same_prototype_only
-        and proto_col in q.index
-        and proto_col in cands.columns
-    ):
+    if same_prototype_only and proto_col in q.index and proto_col in cands.columns:
         if pd.notna(q[proto_col]):
             proto_match = cands[proto_col] == q[proto_col]
             if proto_match.any():
@@ -577,6 +571,7 @@ def retrieve_similar_decision_states(
 # Utilities
 # ---------------------------------------------------------------------------
 
+
 def _l2_normalize(vec: np.ndarray) -> np.ndarray:
     norm = np.linalg.norm(vec)
     if norm < 1e-12:
@@ -584,9 +579,7 @@ def _l2_normalize(vec: np.ndarray) -> np.ndarray:
     return vec / norm
 
 
-def _cosine_similarity_batch(
-    query: np.ndarray, matrix: np.ndarray
-) -> np.ndarray:
+def _cosine_similarity_batch(query: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     """Cosine similarity between a query vector and each row of a matrix."""
     query_norm = np.linalg.norm(query)
     if query_norm < 1e-12:
@@ -611,4 +604,22 @@ def _time_bin_to_hour(time_bin: str) -> float:
 
 
 if __name__ == "__main__":
-    pass
+    city = "nyc"
+    config = SpatialEncodingConfig()
+    scrip_dir = Path(__file__).resolve().parent.parent
+    encoder = DecisionStateEncoder(config=config)
+    decision_state_table_df = pd.read_csv(
+        scrip_dir / f"artifacts/{city}/{city}_decision_state_table.csv"
+    )
+    encoder.fit(decision_state_table_df)
+    case_vectors = encoder.transform(decision_state_table_df)
+    case_coords = encoder.extract_coords(decision_state_table_df)
+
+    with open(scrip_dir / f"artifacts/{city}/{city}_case_vectors.pkl", "wb") as f:
+        pickle.dump(case_vectors, f)
+
+    with open(scrip_dir / f"artifacts/{city}/{city}_case_coords.pkl", "wb") as f:
+        pickle.dump(case_coords, f)
+
+    with open(scrip_dir / f"artifacts/{city}/{city}_case_encoder.pkl", "wb") as f:
+        pickle.dump(encoder, f)
