@@ -279,8 +279,10 @@ if __name__ == "__main__":
     pair_lookup_df = pd.read_csv(
         scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv"
     )
+    # Labeled historical decision states (must include next_POIId). Do not use the
+    # pair-lookup table here — that CSV is src/dst pair geometry, not per-decision labels.
     decision_state_case_base_df = pd.read_csv(
-        scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv"
+        scrip_dir / f"artifacts/{city}/{city}_decision_state_table.csv"
     )
 
     cprint("Loading fitted GMM", "yellow")
