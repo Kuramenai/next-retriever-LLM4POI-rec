@@ -28,11 +28,6 @@ from prompt_construction.itinerary_summarization import (
 )
 from prompt_construction.llm_prompt import build_llm_reranking_prompt
 
-from spatial_encoding.retrieve_decisions_states import RetrievalBlockWeights
-import __main__
-
-__main__.RetrievalBlockWeights = RetrievalBlockWeights
-
 
 # ---------------------------------------------------------------------------
 # LLM: generate + parse (wired into NextPOIEndToEndPipeline)

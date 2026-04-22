@@ -28,6 +28,15 @@ except ImportError as e:
         "vllm is required for make_vllm_generate_fn. Install with: pip install vllm"
     ) from e
 
+from spatial_encoding.retrieve_decisions_states import (
+    RetrievalBlockWeights,
+    SpatialKernelConfig,
+)
+import __main__
+
+__main__.RetrievalBlockWeights = RetrievalBlockWeights
+__main__.SpatialKernelConfig = SpatialKernelConfig
+
 
 def _extract_json_object(text: str) -> str:
     """Strip optional ```json ... ``` fences and return a JSON object substring."""
