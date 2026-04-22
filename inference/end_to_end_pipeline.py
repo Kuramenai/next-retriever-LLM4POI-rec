@@ -5,6 +5,7 @@ import os
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pickle
 from pathlib import Path
@@ -658,7 +659,357 @@ class NextPOIEndToEndPipeline:
 
             out_rows.append({k: v for k, v in rec.items() if not k.startswith("_")})
 
-        return pd.DataFrame(out_rows), pd.DataFrame({"user_prompt": user_prompts, "llm_responses": llm_texts}, columns=["user_prompt", "llm_responses"])
+        return pd.DataFrame(out_rows), pd.DataFrame(
+            {"user_prompt": user_prompts, "llm_responses": llm_texts},
+            columns=["user_prompt", "llm_responses"],
+        )
+
+    def predict_batch_from_test_checkins_batched_retrieval_and_llm(
+        self,
+        test_checkins_df: pd.DataFrame,
+        *,
+        llm_batch_generate_fn: Callable[[list[str], list[str]], list[str]],
+        min_checkins: int = 2,
+        include_details: bool = False,
+        show_progress: bool = True,
+        prompt_workers: int = 0,
+        retrieval_preselect_factor: int = 5,
+        use_torch_cuda: bool = False,
+    ) -> pd.DataFrame:
+        """
+        Batch retrieval + batch LLM decoding.
+
+        Retrieval is optimized by grouping queries by prototype bucket and using
+        one matrix multiply per bucket. To avoid computing spatial distance to
+        every candidate, we do a two-stage ranking:
+          1) preselect top-(top_k * retrieval_preselect_factor) by cosine
+          2) compute spatial + combined score on shortlist, then take top_k
+
+        This usually preserves ranking quality while cutting CPU time sharply.
+        """
+        try:
+            from tqdm import tqdm
+        except ImportError:
+            tqdm = None  # type: ignore[assignment]
+
+        def _haversine_one_to_many_m_from_radians(
+            lat1_r: float,
+            lon1_r: float,
+            lats2_r: np.ndarray,
+            lons2_r: np.ndarray,
+        ) -> np.ndarray:
+            # Earth radius in meters
+            R = 6_371_008.8
+            dlat = lats2_r - lat1_r
+            dlon = lons2_r - lon1_r
+            a = (
+                np.sin(dlat / 2.0) ** 2
+                + np.cos(lat1_r) * np.cos(lats2_r) * np.sin(dlon / 2.0) ** 2
+            )
+            c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
+            return R * c
+
+        config = self.assets.config
+        sid_col = config.session_id_col
+        ts_col = config.timestamp_col
+
+        if sid_col not in test_checkins_df.columns:
+            raise ValueError(f"test_checkins_df must contain session column {sid_col!r}.")
+        if ts_col not in test_checkins_df.columns:
+            raise ValueError(f"test_checkins_df must contain timestamp column {ts_col!r}.")
+
+        idx = self.assets.decision_state_retrieval_index
+        if idx is None:
+            raise ValueError(
+                "decision_state_retrieval_index is required for batched retrieval. "
+                "Build it with build_retrieval_index(...) and pass into EndToEndAssets."
+            )
+
+        encoder = self.assets.decision_state_encoder
+        top_k = int(self.assets.top_k_retrieved_cases)
+        preselect_k = max(top_k, top_k * max(int(retrieval_preselect_factor), 1))
+
+        work = test_checkins_df.copy()
+        work[ts_col] = pd.to_datetime(work[ts_col], errors="coerce")
+        groups = work.sort_values([sid_col, ts_col]).groupby(sid_col, sort=False)
+
+        # ------------------------------------------------------------
+        # 1) Build query states + query vectors
+        # ------------------------------------------------------------
+        session_meta: list[dict[str, Any]] = []
+        query_series: list[pd.Series] = []
+        query_vecs: list[np.ndarray] = []
+        query_coords_rad: list[tuple[float, float]] = []
+        query_bucket_ids: list[Optional[int]] = []
+        qi_counter = 0
+
+        it = groups
+        if show_progress and tqdm is not None:
+            it = tqdm(groups, desc="build query states", unit="session")
+
+        for session_id, session_df in it:
+            session_df = session_df.reset_index(drop=True)
+            if len(session_df) < min_checkins:
+                session_meta.append(
+                    {
+                        sid_col: session_id,
+                        "skipped": True,
+                        "n_checkins": int(len(session_df)),
+                        "gold_next_poi_id": None,
+                        "selected_poi_id": None,
+                        "is_correct_at_1": None,
+                        "error": f"fewer than {min_checkins} check-ins",
+                    }
+                )
+                continue
+
+            try:
+                prefix_df, gold_next = self.build_test_query_from_full_session(session_df)
+                prototype_signals = self.infer_prototype_signals(prefix_df)
+                current_state_df = self.build_current_state(
+                    prefix_df, prototype_signals=prototype_signals
+                )
+                q = current_state_df.iloc[0]
+
+                # Bucket id: prefer routed top1 when present, else proto_prototype_id
+                b = q.get("proto_top1_prototype_id", np.nan)
+                if pd.notna(b):
+                    bucket = int(b)
+                else:
+                    p = q.get("proto_prototype_id", np.nan)
+                    bucket = int(p) if pd.notna(p) else None
+
+                qvec = np.asarray(encoder.transform_single(q), dtype=np.float32)
+                qnorm = np.linalg.norm(qvec)
+                if qnorm > 1e-12:
+                    qvec = qvec / qnorm
+
+                lat, lon = encoder.extract_coords_single(q)
+                if np.isnan(lat) or np.isnan(lon):
+                    qlat_r, qlon_r = np.nan, np.nan
+                else:
+                    qlat_r, qlon_r = float(np.radians(lat)), float(np.radians(lon))
+
+                session_meta.append(
+                    {
+                        sid_col: session_id,
+                        "skipped": False,
+                        "n_checkins": int(len(session_df)),
+                        "gold_next_poi_id": gold_next[self.assets.config.poi_id_col],
+                        "selected_poi_id": None,
+                        "is_correct_at_1": None,
+                        "error": None,
+                        "_prefix_df": prefix_df,
+                        "_current_state_df": current_state_df,
+                        "_qi": qi_counter,
+                    }
+                )
+                query_series.append(q)
+                query_vecs.append(qvec)
+                query_coords_rad.append((qlat_r, qlon_r))
+                query_bucket_ids.append(bucket)
+                qi_counter += 1
+            except Exception as e:
+                session_meta.append(
+                    {
+                        sid_col: session_id,
+                        "skipped": False,
+                        "n_checkins": int(len(session_df)),
+                        "gold_next_poi_id": None,
+                        "selected_poi_id": None,
+                        "is_correct_at_1": None,
+                        "error": repr(e),
+                    }
+                )
+
+        if not query_vecs:
+            return pd.DataFrame(
+                [{k: v for k, v in r.items() if not k.startswith("_")} for r in session_meta]
+            )
+
+        Q = np.vstack(query_vecs).astype(np.float32, copy=False)  # (B, D)
+
+        # ------------------------------------------------------------
+        # 2) Batched cosine retrieval per prototype bucket
+        # ------------------------------------------------------------
+        retrieved_rows: list[np.ndarray] = [
+            np.array([], dtype=np.int64) for _ in range(len(query_vecs))
+        ]
+
+        # Optional GPU acceleration for cosine matmul (PyTorch)
+        torch = None
+        device = None
+        if use_torch_cuda:
+            try:
+                import torch as _torch  # type: ignore[import-not-found]
+
+                if _torch.cuda.is_available():
+                    torch = _torch
+                    device = torch.device("cuda")
+            except Exception:
+                torch = None
+                device = None
+
+        bucket_to_qidx: dict[Optional[int], list[int]] = {}
+        for qi, b in enumerate(query_bucket_ids):
+            bucket_to_qidx.setdefault(b, []).append(qi)
+
+        for bucket, q_indices in bucket_to_qidx.items():
+            cand_idx = (
+                idx.prototype_to_indices.get(int(bucket), idx.all_idx)
+                if bucket is not None
+                else idx.all_idx
+            )
+
+            V = idx.case_vectors_unit[cand_idx].astype(np.float32, copy=False)  # (M, D)
+            Qb = Q[q_indices]  # (Bq, D)
+
+            if torch is not None and device is not None:
+                Vt = torch.from_numpy(V).to(device)
+                Qt = torch.from_numpy(Qb).to(device)
+                scores_mb = (Vt @ Qt.T).float().cpu().numpy()  # (M, Bq)
+            else:
+                scores_mb = V @ Qb.T  # (M, Bq)
+
+            for local_j, qi in enumerate(q_indices):
+                q = query_series[qi]
+
+                # exclude same session
+                if config.session_id_col in q.index:
+                    qsid = q[config.session_id_col]
+                    mask = idx.session_ids[cand_idx] != qsid
+                    cand_idx_f = cand_idx[mask]
+                    scores = scores_mb[mask, local_j]
+                else:
+                    cand_idx_f = cand_idx
+                    scores = scores_mb[:, local_j]
+
+                if cand_idx_f.size == 0:
+                    retrieved_rows[qi] = np.array([], dtype=np.int64)
+                    continue
+
+                k0 = min(int(preselect_k), int(cand_idx_f.size))
+                if cand_idx_f.size > k0:
+                    local = np.argpartition(scores, -k0)[-k0:]
+                    local = local[np.argsort(scores[local])[::-1]]
+                else:
+                    local = np.argsort(scores)[::-1]
+
+                shortlist_rows = cand_idx_f[local]
+
+                # Spatial + combined score on shortlist
+                alpha = float(encoder.weights.spatial_alpha)
+                cosine_s = scores[local].astype(np.float32, copy=False)
+
+                qlat_r, qlon_r = query_coords_rad[qi]
+                if idx.case_coords_rad is None or np.isnan(qlat_r) or np.isnan(qlon_r):
+                    spatial_s = np.zeros_like(cosine_s, dtype=np.float32)
+                else:
+                    coords_r = idx.case_coords_rad[shortlist_rows]
+                    d_m = _haversine_one_to_many_m_from_radians(
+                        qlat_r, qlon_r, coords_r[:, 0], coords_r[:, 1]
+                    )
+                    tau = float(encoder.spatial_kernel.tau_m)
+                    spatial_s = np.exp(-d_m / tau).astype(np.float32)
+                    spatial_s = np.where(np.isnan(spatial_s), 0.0, spatial_s)
+
+                combined = alpha * spatial_s + (1.0 - alpha) * cosine_s
+
+                k = min(top_k, len(combined))
+                if len(combined) > k:
+                    top_local = np.argpartition(combined, -k)[-k:]
+                    top_local = top_local[np.argsort(combined[top_local])[::-1]]
+                else:
+                    top_local = np.argsort(combined)[::-1]
+
+                retrieved_rows[qi] = shortlist_rows[top_local]
+
+        # ------------------------------------------------------------
+        # 3) Build prompt payloads (optionally parallel)
+        # ------------------------------------------------------------
+        def _build_one_prompt(meta_i: int) -> tuple[str, str, list[Any]]:
+            meta = session_meta[meta_i]
+            prefix_df = meta["_prefix_df"]
+            current_state_df = meta["_current_state_df"]
+            qi = int(meta["_qi"])
+
+            retrieved_cases_df = idx.case_base_df.iloc[retrieved_rows[qi]].copy()
+            candidate_pois_df = self.aggregate_candidates(retrieved_cases_df)
+            prompt_payload = self.build_prompt_payload(
+                prefix_df=prefix_df,
+                current_state_df=current_state_df,
+                retrieved_cases_df=retrieved_cases_df,
+                candidate_pois_df=candidate_pois_df,
+            )
+            return (
+                prompt_payload["system_prompt"],
+                prompt_payload["user_prompt"],
+                candidate_pois_df["next_POIId"].tolist(),
+            )
+
+        # indices in session_meta that correspond to built queries
+        query_meta_indices = [
+            i for i, r in enumerate(session_meta) if r.get("error") is None and not r.get("skipped")
+        ]
+
+        system_prompts: list[str] = ["" for _ in range(len(query_meta_indices))]
+        user_prompts: list[str] = ["" for _ in range(len(query_meta_indices))]
+        fallback_ids_list: list[list[Any]] = [[] for _ in range(len(query_meta_indices))]
+
+        if prompt_workers and prompt_workers > 0:
+            with ThreadPoolExecutor(max_workers=int(prompt_workers)) as ex:
+                futs = {
+                    ex.submit(_build_one_prompt, meta_i): pos
+                    for pos, meta_i in enumerate(query_meta_indices)
+                }
+                for fut in as_completed(futs):
+                    pos = futs[fut]
+                    sp, up, fids = fut.result()
+                    system_prompts[pos] = sp
+                    user_prompts[pos] = up
+                    fallback_ids_list[pos] = fids
+        else:
+            for pos, meta_i in enumerate(query_meta_indices):
+                sp, up, fids = _build_one_prompt(meta_i)
+                system_prompts[pos] = sp
+                user_prompts[pos] = up
+                fallback_ids_list[pos] = fids
+
+        # ------------------------------------------------------------
+        # 4) Batched LLM decoding + parse
+        # ------------------------------------------------------------
+        llm_texts = llm_batch_generate_fn(system_prompts, user_prompts) if system_prompts else []
+        if len(llm_texts) != len(system_prompts):
+            raise RuntimeError(
+                f"llm_batch_generate_fn returned {len(llm_texts)} outputs for {len(system_prompts)} prompts."
+            )
+
+        out_rows: list[dict[str, Any]] = []
+        llm_i = 0
+        for meta in session_meta:
+            if meta.get("skipped") or meta.get("error") is not None:
+                out_rows.append({k: v for k, v in meta.items() if not k.startswith("_")})
+                continue
+
+            llm_text = llm_texts[llm_i]
+            fallback_ids = fallback_ids_list[llm_i]
+            llm_i += 1
+
+            try:
+                selected = self.llm_parse_fn(llm_text, fallback_ids)
+                meta["selected_poi_id"] = selected
+                gold = meta.get("gold_next_poi_id", None)
+                meta["is_correct_at_1"] = (selected == gold) if gold is not None else None
+                if include_details:
+                    meta["llm_raw_text"] = llm_text
+            except Exception as e:
+                meta["error"] = meta.get("error") or repr(e)
+                if include_details:
+                    meta["llm_raw_text"] = llm_text
+
+            out_rows.append({k: v for k, v in meta.items() if not k.startswith("_")})
+
+        return pd.DataFrame(out_rows)
 
 
 if __name__ == "__main__":

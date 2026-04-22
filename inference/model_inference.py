@@ -391,7 +391,7 @@ if __name__ == "__main__":
         prototype_caption_map=None,  # optional
         pair_lookup_dict=None,  # optional (perf)
         poi_coord_map=None,  # optional (perf)
-        prototype_union_k=2,  # retrieve over union of top-3 routed prototypes
+        prototype_union_k=3,  # retrieve over union of top-3 routed prototypes
     )
 
     cprint("Launching VLLM", "yellow")
@@ -424,13 +424,21 @@ if __name__ == "__main__":
 
     # All sessions in test_sample_df (one next-step prediction per session),
     # batching the LLM decoding via vLLM.
-    batch_results, prompts_responses = pipeline.predict_batch_from_test_checkins_batched_llm(
-        test_sample_df,
-        llm_batch_generate_fn=llm_batch_generate_fn,
-        min_checkins=2,
-        include_details=False,
-        show_progress=True,
-    )
+    # batch_results, prompts_responses = pipeline.predict_batch_from_test_checkins_batched_llm(
+    #     test_sample_df,
+    #     llm_batch_generate_fn=llm_batch_generate_fn,
+    #     min_checkins=2,
+    #     include_details=False,
+    #     show_progress=True,
+    # )
+    batch_results = pipeline.predict_batch_from_test_checkins_batched_retrieval_and_llm(
+    test_sample_df,
+    llm_batch_generate_fn=llm_batch_generate_fn,
+    min_checkins=2,
+    prompt_workers=16,          # try 4/8 later
+    retrieval_preselect_factor=5,
+    use_torch_cuda=True,      # try True if torch+cuda available
+)
     evaluated = batch_results.loc[~batch_results["skipped"] & batch_results["error"].isna()]
     if len(evaluated) > 0:
         acc = float(evaluated["is_correct_at_1"].mean())
