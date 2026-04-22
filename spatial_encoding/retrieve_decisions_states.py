@@ -414,9 +414,94 @@ class DecisionStateEncoder:
 
 
 # ---------------------------------------------------------------------------
-# Retrieval
+# Retrieval index (precomputed, fast path)
 # ---------------------------------------------------------------------------
 
+
+@dataclass(frozen=True)
+class DecisionStateRetrievalIndex:
+    """
+    Precomputed retrieval structures for fast query-time similarity search.
+
+    - `case_vectors_unit` should be float32 and row-L2-normalized.
+    - `case_coords` should be float32 (N×2) lat/lon for spatial kernel.
+    - `session_ids` and `prototype_ids` are used for cheap filtering.
+    """
+
+    case_base_df: pd.DataFrame
+    case_vectors_unit: np.ndarray
+    case_coords: Optional[np.ndarray]
+    session_ids: np.ndarray
+    prototype_ids: np.ndarray
+    all_idx: np.ndarray
+    prototype_to_indices: dict[int, np.ndarray]
+
+
+def build_retrieval_index(
+    *,
+    case_base_df: pd.DataFrame,
+    case_vectors: np.ndarray,
+    config,
+    case_coords: Optional[np.ndarray] = None,
+    proto_col: str = "proto_prototype_id",
+) -> DecisionStateRetrievalIndex:
+    """
+    Build a retrieval index once at startup (numpy-first).
+    """
+    if len(case_base_df) == 0:
+        raise ValueError("case_base_df is empty; cannot build retrieval index.")
+
+    mat = np.asarray(case_vectors, dtype=np.float32)
+    if mat.ndim != 2 or mat.shape[0] != len(case_base_df):
+        raise ValueError(
+            f"case_vectors must be shape (N,D) with N=len(case_base_df); got {mat.shape}."
+        )
+
+    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+    norms = np.where(norms < 1e-12, 1.0, norms)
+    mat_unit = mat / norms
+
+    if config.session_id_col not in case_base_df.columns:
+        raise ValueError(
+            f"case_base_df must contain {config.session_id_col!r} for filtering."
+        )
+    session_ids = case_base_df[config.session_id_col].to_numpy()
+
+    if proto_col in case_base_df.columns:
+        prototype_ids = pd.to_numeric(case_base_df[proto_col], errors="coerce").to_numpy()
+    else:
+        prototype_ids = np.full(len(case_base_df), np.nan, dtype=float)
+
+    all_idx = np.arange(len(case_base_df), dtype=np.int64)
+
+    prototype_to_indices: dict[int, np.ndarray] = {}
+    valid = ~np.isnan(prototype_ids)
+    if valid.any():
+        for p in np.unique(prototype_ids[valid]).astype(int):
+            prototype_to_indices[int(p)] = np.flatnonzero(prototype_ids == p)
+
+    coords_arr: Optional[np.ndarray]
+    if case_coords is None:
+        coords_arr = None
+    else:
+        coords_arr = np.asarray(case_coords, dtype=np.float32)
+        if coords_arr.shape != (len(case_base_df), 2):
+            raise ValueError(f"case_coords must have shape (N,2); got {coords_arr.shape}.")
+
+    return DecisionStateRetrievalIndex(
+        case_base_df=case_base_df,
+        case_vectors_unit=mat_unit,
+        case_coords=coords_arr,
+        session_ids=session_ids,
+        prototype_ids=prototype_ids,
+        all_idx=all_idx,
+        prototype_to_indices=prototype_to_indices,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Retrieval (public API; can use index fast-path)
+# ---------------------------------------------------------------------------
 
 def retrieve_similar_decision_states(
     query_state: Union[pd.Series, pd.DataFrame],
@@ -424,6 +509,7 @@ def retrieve_similar_decision_states(
     encoder: DecisionStateEncoder,
     config,
     *,
+    retrieval_index: Optional[DecisionStateRetrievalIndex] = None,
     case_vectors: Optional[np.ndarray] = None,
     case_coords: Optional[np.ndarray] = None,
     top_k: int = 50,
@@ -474,6 +560,70 @@ def retrieve_similar_decision_states(
     else:
         raise TypeError("query_state must be a pandas Series or single-row DataFrame.")
 
+    # ------------------------------------------------------------------
+    # Fast path: use pre-built retrieval index (avoid pandas until the end)
+    # ------------------------------------------------------------------
+    if retrieval_index is not None:
+        idx = retrieval_index
+        if len(idx.case_base_df) == 0:
+            return idx.case_base_df.copy()
+
+        cand_idx = idx.all_idx
+
+        query_proto = q.get("proto_prototype_id", np.nan)
+        if same_prototype_only and pd.notna(query_proto):
+            cand_idx = idx.prototype_to_indices.get(int(query_proto), cand_idx)
+
+        if exclude_same_session and config.session_id_col in q.index:
+            qsid = q[config.session_id_col]
+            cand_idx = cand_idx[idx.session_ids[cand_idx] != qsid]
+
+        if cand_idx.size == 0:
+            out = idx.case_base_df.iloc[[]].copy()
+            out["retrieval_score"] = []
+            out["spatial_score"] = []
+            out["cosine_score"] = []
+            return out
+
+        # cosine over pre-normalized case vectors
+        qvec = np.asarray(encoder.transform_single(q), dtype=np.float32)
+        qnorm = np.linalg.norm(qvec)
+        if qnorm > 1e-12:
+            qvec = qvec / qnorm
+        cosine_scores = idx.case_vectors_unit[cand_idx] @ qvec
+
+        # spatial kernel (optional coords)
+        query_lat, query_lon = encoder.extract_coords_single(q)
+        if idx.case_coords is None or np.isnan(query_lat) or np.isnan(query_lon):
+            spatial_scores = np.zeros(len(cand_idx), dtype=np.float32)
+        else:
+            coords = idx.case_coords[cand_idx]
+            distances_m = _haversine_one_to_many_m(
+                query_lat, query_lon, coords[:, 0], coords[:, 1]
+            )
+            tau = float(encoder.spatial_kernel.tau_m)
+            spatial_scores = np.exp(-distances_m / tau).astype(np.float32)
+            spatial_scores = np.where(np.isnan(spatial_scores), 0.0, spatial_scores)
+
+        alpha = float(encoder.weights.spatial_alpha)
+        combined_scores = alpha * spatial_scores + (1.0 - alpha) * cosine_scores
+
+        if len(cand_idx) > top_k:
+            local = np.argpartition(combined_scores, -top_k)[-top_k:]
+            local = local[np.argsort(combined_scores[local])[::-1]]
+        else:
+            local = np.argsort(combined_scores)[::-1]
+
+        rows = cand_idx[local]
+        out = idx.case_base_df.iloc[rows].copy()
+        out["retrieval_score"] = combined_scores[local]
+        out["spatial_score"] = spatial_scores[local]
+        out["cosine_score"] = cosine_scores[local]
+        return out.reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # Reference path (older behavior)
+    # ------------------------------------------------------------------
     cands = case_base_df.copy()
     if len(cands) == 0:
         return cands
