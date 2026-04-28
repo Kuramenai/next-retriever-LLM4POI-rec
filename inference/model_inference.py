@@ -449,5 +449,5 @@ if __name__ == "__main__":
     
     cprint("Writing prompts and responses to file", "yellow")
     out_path = scrip_dir / f"artifacts/{city}/{city}_batch_inference_prompts_responses.csv"
-    prompts_responses.to_csv(out_path, index=False)
+    # prompts_responses.to_csv(out_path, index=False)
     cprint(f"Wrote prompts and responses to {out_path}", "green")

@@ -50,6 +50,11 @@ def build_feature_blocks(
     category_ngram_range: tuple[int, int] = (1, 2),
     category_svd_components: int | None = 64,
     random_state: int = 42,
+    # ── New parameters for taxonomy + absorption ──
+    taxonomy_level: str = "raw",
+    absorb_transit: bool = False,
+    absorb_neutral: bool = False,
+    absorption_mode: str = "retrospective",
 ) -> dict:
     """
     Build Module-1 feature blocks and final dense matrices for GMM.
@@ -61,6 +66,17 @@ def build_feature_blocks(
       - Category
       - Latitude
       - Longitude
+
+    Parameters
+    ----------
+    taxonomy_level : str
+        "raw" (207 categories), "mid" (17 categories), or "seg" (8 categories).
+    absorb_transit : bool
+        If True, transit check-ins inherit destination's category label.
+    absorb_neutral : bool
+        If True, neutral check-ins inherit preceding activity's label.
+    absorption_mode : str
+        "retrospective" (offline) or "online" (prefix, trailing transit unresolved).
 
     Returns a dictionary with:
       - train / val / test dense matrices
@@ -96,15 +112,31 @@ def build_feature_blocks(
     # ------------------------------------------------------------------
     # 2) CATEGORY BLOCK
     # ------------------------------------------------------------------
-    # fmt: off
-    cprint("Extracting category features...", "yellow")
-    train_cat_df = build_category_documents(train_checkins)
-    val_cat_df = build_category_documents(val_checkins)
-    test_cat_df = build_category_documents(test_checkins)
+    cprint(
+        f"Extracting category features "
+        f"(level={taxonomy_level}, absorb_transit={absorb_transit}, "
+        f"absorb_neutral={absorb_neutral})...",
+        "yellow",
+    )
 
-    train_cat_df = align_session_dataframe(train_temp_meta, train_cat_df, name="train_cat_df")
+    cat_kwargs = dict(
+        taxonomy_level=taxonomy_level,
+        absorb_transit=absorb_transit,
+        absorb_neutral=absorb_neutral,
+        mode=absorption_mode,
+    )
+
+    train_cat_df = build_category_documents(train_checkins, **cat_kwargs)
+    val_cat_df = build_category_documents(val_checkins, **cat_kwargs)
+    test_cat_df = build_category_documents(test_checkins, **cat_kwargs)
+
+    train_cat_df = align_session_dataframe(
+        train_temp_meta, train_cat_df, name="train_cat_df"
+    )
     val_cat_df = align_session_dataframe(val_temp_meta, val_cat_df, name="val_cat_df")
-    test_cat_df = align_session_dataframe(test_temp_meta, test_cat_df, name="test_cat_df")
+    test_cat_df = align_session_dataframe(
+        test_temp_meta, test_cat_df, name="test_cat_df"
+    )
 
     vectorizer = TfidfVectorizer(
         analyzer="word",
@@ -123,18 +155,37 @@ def build_feature_blocks(
 
     # GMM needs dense input; compress sparse TF-IDF if requested
     if category_svd_components is not None:
-        max_valid_components = min(X_train_cat_tfidf.shape[0] - 1, X_train_cat_tfidf.shape[1] - 1)
+        max_valid_components = min(
+            X_train_cat_tfidf.shape[0] - 1, X_train_cat_tfidf.shape[1] - 1
+        )
         if max_valid_components < 1:
-            raise ValueError("Not enough training sessions or category vocabulary to run TruncatedSVD.")
+            raise ValueError(
+                "Not enough training sessions or category vocabulary to run TruncatedSVD."
+            )
 
         n_components = min(category_svd_components, max_valid_components)
 
-        category_svd = TruncatedSVD(n_components=n_components, random_state=random_state)
+        category_svd = TruncatedSVD(
+            n_components=n_components, random_state=random_state
+        )
         category_post_normalizer = Normalizer(norm="l2")
 
-        X_train_cat = category_post_normalizer.fit_transform(category_svd.fit_transform(X_train_cat_tfidf))
-        X_val_cat = category_post_normalizer.transform(category_svd.transform(X_val_cat_tfidf))
-        X_test_cat = category_post_normalizer.transform(category_svd.transform(X_test_cat_tfidf))
+        X_train_cat = category_post_normalizer.fit_transform(
+            category_svd.fit_transform(X_train_cat_tfidf)
+        )
+        X_val_cat = category_post_normalizer.transform(
+            category_svd.transform(X_val_cat_tfidf)
+        )
+        X_test_cat = category_post_normalizer.transform(
+            category_svd.transform(X_test_cat_tfidf)
+        )
+
+        explained_var = category_svd.explained_variance_ratio_.sum()
+        cprint(
+            f"  SVD: {n_components} components, "
+            f"explained variance: {explained_var:.2%}",
+            "cyan",
+        )
     else:
         category_svd = None
         category_post_normalizer = None
@@ -142,11 +193,15 @@ def build_feature_blocks(
         X_val_cat = X_val_cat_tfidf.toarray()
         X_test_cat = X_test_cat_tfidf.toarray()
 
+    vocab_size = len(vectorizer.vocabulary_)
+    cprint(
+        f"Category features extracted successfully. Vocabulary: {vocab_size} tokens.",
+        "green",
+    )
+
     X_train_cat = np.asarray(X_train_cat, dtype=np.float32)
     X_val_cat = np.asarray(X_val_cat, dtype=np.float32)
     X_test_cat = np.asarray(X_test_cat, dtype=np.float32)
-
-    cprint("Category features extracted successfully.", "green")
 
     # ------------------------------------------------------------------
     # 3) SPATIAL BLOCK
@@ -185,9 +240,15 @@ def build_feature_blocks(
     ]
 
     spatial_scaler = StandardScaler()
-    X_train_spatial = spatial_scaler.fit_transform(train_spatial_df[spatial_cols].to_numpy(dtype=np.float32))
-    X_val_spatial = spatial_scaler.transform(val_spatial_df[spatial_cols].to_numpy(dtype=np.float32))
-    X_test_spatial = spatial_scaler.transform(test_spatial_df[spatial_cols].to_numpy(dtype=np.float32))
+    X_train_spatial = spatial_scaler.fit_transform(
+        train_spatial_df[spatial_cols].to_numpy(dtype=np.float32)
+    )
+    X_val_spatial = spatial_scaler.transform(
+        val_spatial_df[spatial_cols].to_numpy(dtype=np.float32)
+    )
+    X_test_spatial = spatial_scaler.transform(
+        test_spatial_df[spatial_cols].to_numpy(dtype=np.float32)
+    )
 
     X_train_spatial = np.asarray(X_train_spatial, dtype=np.float32)
     X_val_spatial = np.asarray(X_val_spatial, dtype=np.float32)
@@ -202,16 +263,24 @@ def build_feature_blocks(
     X_val = np.hstack([X_val_temp, X_val_cat, X_val_spatial]).astype(np.float32)
     X_test = np.hstack([X_test_temp, X_test_cat, X_test_spatial]).astype(np.float32)
 
+    cprint(
+        f"Final feature matrix: {X_train.shape[1]} dims "
+        f"(temporal={X_train_temp.shape[1]}, "
+        f"category={X_train_cat.shape[1]}, "
+        f"spatial={X_train_spatial.shape[1]})",
+        "cyan",
+    )
+
     # ------------------------------------------------------------------
     # 5) METADATA
     # ------------------------------------------------------------------
+    meta_cat_cols = ["SessionId", "category_sequence", "category_doc"]
+    if "category_sequence_raw" in train_cat_df.columns:
+        meta_cat_cols.append("category_sequence_raw")
+
     train_meta = (
         train_temp_meta[["SessionId", "session_start_time", "session_end_time"]]
-        .merge(
-            train_cat_df[["SessionId", "category_sequence", "category_doc"]],
-            on="SessionId",
-            how="left",
-        )
+        .merge(train_cat_df[meta_cat_cols], on="SessionId", how="left")
         .merge(
             train_spatial_df[["SessionId"] + spatial_cols], on="SessionId", how="left"
         )
@@ -219,21 +288,13 @@ def build_feature_blocks(
 
     val_meta = (
         val_temp_meta[["SessionId", "session_start_time", "session_end_time"]]
-        .merge(
-            val_cat_df[["SessionId", "category_sequence", "category_doc"]],
-            on="SessionId",
-            how="left",
-        )
+        .merge(val_cat_df[meta_cat_cols], on="SessionId", how="left")
         .merge(val_spatial_df[["SessionId"] + spatial_cols], on="SessionId", how="left")
     )
 
     test_meta = (
         test_temp_meta[["SessionId", "session_start_time", "session_end_time"]]
-        .merge(
-            test_cat_df[["SessionId", "category_sequence", "category_doc"]],
-            on="SessionId",
-            how="left",
-        )
+        .merge(test_cat_df[meta_cat_cols], on="SessionId", how="left")
         .merge(
             test_spatial_df[["SessionId"] + spatial_cols], on="SessionId", how="left"
         )
@@ -278,5 +339,8 @@ def build_feature_blocks(
             "category_post_normalizer": category_post_normalizer,
             "spatial_scaler": spatial_scaler,
             "spatial_cols": spatial_cols,
+            "taxonomy_level": taxonomy_level,
+            "absorb_transit": absorb_transit,
+            "absorb_neutral": absorb_neutral,
         },
     }

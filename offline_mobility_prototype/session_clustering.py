@@ -253,27 +253,41 @@ def fit_gmm_prototypes(
     }
 
 
-# fmt: off
 if __name__ == "__main__":
     cprint("Starting GMM prototypes fitting...", "yellow")
     cprint("Loading check-in data...", "yellow")
 
-    city = "tky"
-    out_dir = Path(f"data/{city}")
+    city = "nyc"
+    out_dir = Path(__file__).resolve().parent.parent / f"data/{city}"
     train_checkins = pd.read_csv(out_dir / "train_sample.csv")
     val_checkins = pd.read_csv(out_dir / "validate_sample_with_traj.csv")
     test_checkins = pd.read_csv(out_dir / "test_sample.csv")
 
     train_checkins = train_checkins.rename(
-        columns={"pseudo_session_trajectory_id": "SessionId", "PoiCategoryId": "PId", "PoiCategoryName": "Category"})
+        columns={
+            "pseudo_session_trajectory_id": "SessionId",
+            "PoiCategoryId": "PId",
+            "PoiCategoryName": "Category",
+        }
+    )
     train_checkins["Time"] = pd.to_datetime(train_checkins["UTCTimeOffset"])
 
     val_checkins = val_checkins.rename(
-        columns={"pseudo_session_trajectory_id": "SessionId", "PoiCategoryId": "PId", "PoiCategoryName": "Category"})
+        columns={
+            "pseudo_session_trajectory_id": "SessionId",
+            "PoiCategoryId": "PId",
+            "PoiCategoryName": "Category",
+        }
+    )
     val_checkins["Time"] = pd.to_datetime(val_checkins["UTCTimeOffset"])
 
     test_checkins = test_checkins.rename(
-        columns={"pseudo_session_trajectory_id": "SessionId", "PoiCategoryId": "PId", "PoiCategoryName": "Category"})
+        columns={
+            "pseudo_session_trajectory_id": "SessionId",
+            "PoiCategoryId": "PId",
+            "PoiCategoryName": "Category",
+        }
+    )
     test_checkins["Time"] = pd.to_datetime(test_checkins["UTCTimeOffset"])
 
     cprint("Check-in data loaded successfully.", "green")
@@ -283,6 +297,9 @@ if __name__ == "__main__":
         train_checkins=train_checkins,
         val_checkins=val_checkins,
         test_checkins=test_checkins,
+        taxonomy_level="raw",
+        absorb_transit=True,
+        absorb_neutral=True,
     )
 
     cprint("Feature blocks built successfully.", "green")
@@ -294,7 +311,7 @@ if __name__ == "__main__":
         X_val=feature_data["val"]["X"],
         val_meta=feature_data["val"]["meta"],
         X_test=feature_data["test"]["X"],
-        test_meta=feature_data["test"]["meta"]
+        test_meta=feature_data["test"]["meta"],
     )
 
     cprint("GMM prototypes fitted successfully.", "green")
@@ -311,7 +328,7 @@ if __name__ == "__main__":
     gmm_path.parent.mkdir(parents=True, exist_ok=True)
     with gmm_path.open("wb") as f:
         pickle.dump(gmm_data, f)
-    
+
     cprint("Saving features", "yellow")
     features_path = Path(f"artifacts/{city}/{city}_features.pkl")
     features_path.parent.mkdir(parents=True, exist_ok=True)

@@ -488,8 +488,61 @@ if __name__ == "__main__":
         scrip_dir / f"artifacts/{city}/{city}_session_transition.csv"
     )
 
+    # Optional: attach Module-1 prototype assignments if the GMM artifact exists.
+    # This keeps behavior backward-compatible when the artifact is absent.
+    session_prototype_df = None
+    gmm_path = scrip_dir / f"artifacts/{city}/{city}_gmm_cluster.pkl"
+    if gmm_path.exists():
+        cprint(
+            f"\nFound Module-1 artifact at {gmm_path}; loading prototype assignments...",
+            "yellow",
+        )
+        with gmm_path.open("rb") as f:
+            gmm_payload = pickle.load(f)
+
+        train_payload = gmm_payload.get("train", {})
+        maybe_assignments = train_payload.get("assignments", None)
+        if isinstance(maybe_assignments, pd.DataFrame) and len(maybe_assignments) > 0:
+            session_prototype_df = maybe_assignments.copy()
+            if (
+                config.session_id_col not in session_prototype_df.columns
+                and "SessionId" in session_prototype_df.columns
+            ):
+                session_prototype_df = session_prototype_df.rename(
+                    columns={"SessionId": config.session_id_col}
+                )
+
+            if config.session_id_col not in session_prototype_df.columns:
+                cprint(
+                    "Prototype assignments loaded but session id column is incompatible; "
+                    "continuing without prototype signals.",
+                    "yellow",
+                )
+                session_prototype_df = None
+            else:
+                cprint(
+                    "Prototype assignments will be merged into decision states.",
+                    "green",
+                )
+        else:
+            cprint(
+                "GMM artifact found but no train assignments table is available; "
+                "continuing without prototype signals.",
+                "yellow",
+            )
+    else:
+        cprint(
+            f"\nNo Module-1 artifact found at {gmm_path}; "
+            "building decision states without prototype signals.",
+            "yellow",
+        )
+
     decision_state_df = build_decision_state_table(
-        train_checkins_df, poi_descriptor_df, session_transition_df, config
+        train_checkins_df,
+        poi_descriptor_df,
+        session_transition_df,
+        config,
+        session_prototype_df=session_prototype_df,
     )
 
     decision_state_df.to_csv(

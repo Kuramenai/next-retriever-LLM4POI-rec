@@ -286,6 +286,94 @@ class DecisionStateEncoder:
     # Fit: learn scalers and vocabulary from training case base
     # ------------------------------------------------------------------
 
+    def _safe_numeric_col(
+        self,
+        df: pd.DataFrame,
+        col: str,
+        *,
+        default: float = 0.0,
+    ) -> np.ndarray:
+        """
+        Extract one numeric column as float32 array, coercing errors to NaN and
+        filling NaN with `default`.
+        """
+        if col not in df.columns:
+            return np.full(len(df), float(default), dtype=np.float32)
+        arr = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=np.float32, copy=False)
+        if np.isnan(arr).any():
+            arr = np.where(np.isnan(arr), float(default), arr).astype(np.float32, copy=False)
+        return arr
+
+    def _l2_normalize_rows(self, mat: np.ndarray) -> np.ndarray:
+        norms = np.linalg.norm(mat, axis=1, keepdims=True)
+        norms = np.where(norms < 1e-12, 1.0, norms)
+        return mat / norms
+
+    def _extract_temporal_batch(self, df: pd.DataFrame) -> np.ndarray:
+        """
+        Vectorized temporal block: [sin(2πh/24), cos(2πh/24)] per row.
+        Uses current_timestamp if available, else falls back to time-bin midpoints.
+        """
+        if "current_timestamp" in df.columns:
+            ts = pd.to_datetime(df["current_timestamp"], errors="coerce")
+            hour = ts.dt.hour.astype(float) + ts.dt.minute.astype(float) / 60.0
+            hour = hour.fillna(df.get("current_time_bin", "midday").map(_time_bin_to_hour))  # type: ignore[arg-type]
+            hour = hour.to_numpy(dtype=np.float32)
+        else:
+            tbin = df.get("current_time_bin", pd.Series(["midday"] * len(df)))
+            hour = tbin.map(_time_bin_to_hour).to_numpy(dtype=np.float32)  # type: ignore[arg-type]
+
+        angle = 2.0 * np.pi * hour / 24.0
+        return np.column_stack([np.sin(angle), np.cos(angle)]).astype(np.float32)
+
+    def _extract_context_batch(self, df: pd.DataFrame) -> np.ndarray:
+        density = self._safe_numeric_col(df, self.density_col, default=0.0)
+        connectivity = self._safe_numeric_col(df, self.connectivity_col, default=0.0)
+        return np.column_stack([density, connectivity]).astype(np.float32)
+
+    def _extract_prefix_batch(self, df: pd.DataFrame) -> np.ndarray:
+        a = self._safe_numeric_col(df, "prefix_elapsed_min", default=0.0)
+        b = self._safe_numeric_col(df, "prefix_repeat_ratio", default=0.0)
+        c = self._safe_numeric_col(df, "prefix_unique_poi_count", default=1.0)
+        d = self._safe_numeric_col(df, "prefix_unique_category_count", default=1.0)
+        return np.column_stack([a, b, c, d]).astype(np.float32)
+
+    def _extract_movement_batch(self, df: pd.DataFrame) -> np.ndarray:
+        parts = []
+        for lag in range(1, self.recent_k + 1):
+            prefix = f"prev{lag}"
+            dist = self._safe_numeric_col(df, f"{prefix}_distance_m", default=0.0)
+            gap = self._safe_numeric_col(df, f"{prefix}_gap_s", default=0.0)
+            bearing = self._safe_numeric_col(df, f"{prefix}_bearing_deg", default=np.nan)
+
+            dist = np.log1p(dist)
+            gap = np.log1p(gap)
+
+            bearing_rad = np.deg2rad(bearing.astype(np.float32, copy=False))
+            sinb = np.sin(np.where(np.isnan(bearing_rad), 0.0, bearing_rad))
+            cosb = np.cos(np.where(np.isnan(bearing_rad), 0.0, bearing_rad))
+
+            parts.extend([dist, gap, sinb.astype(np.float32), cosb.astype(np.float32)])
+
+        return np.column_stack(parts).astype(np.float32)
+
+    def _extract_category_onehot_batch(self, df: pd.DataFrame) -> np.ndarray:
+        if not self._category_vocab:
+            return np.zeros((len(df), 0), dtype=np.float32)
+        if "current_category" not in df.columns:
+            return np.zeros((len(df), len(self._category_vocab)), dtype=np.float32)
+
+        cats = df["current_category"].astype(str)
+        codes = cats.map(self._category_to_idx).to_numpy(dtype=np.float32)
+        # map returns floats with NaN for missing; convert to int with -1 for missing
+        codes_i = np.where(np.isnan(codes), -1, codes).astype(np.int32)
+
+        out = np.zeros((len(df), len(self._category_vocab)), dtype=np.float32)
+        rows = np.arange(len(df), dtype=np.int32)
+        valid = codes_i >= 0
+        out[rows[valid], codes_i[valid]] = 1.0
+        return out
+
     def fit(self, case_base_df: pd.DataFrame) -> "DecisionStateEncoder":
         """
         Fit scalers on the training decision-state table.
@@ -295,23 +383,18 @@ class DecisionStateEncoder:
         if n == 0:
             raise ValueError("Cannot fit encoder on empty case base.")
 
-        # Collect raw arrays for each scalable block
-        context_arr = np.zeros((n, 2), dtype=float)
-        movement_dim = 4 * self.recent_k
-        movement_arr = np.zeros((n, movement_dim), dtype=float)
-        prefix_arr = np.zeros((n, 4), dtype=float)
-
-        for i, (_, row) in enumerate(case_base_df.iterrows()):
-            context_arr[i] = self._extract_context(row)
-            movement_arr[i] = self._extract_movement(row)
-            prefix_arr[i] = self._extract_prefix_summary(row)
+        # Collect raw arrays for each scalable block (vectorized)
+        context_arr = self._extract_context_batch(case_base_df)
+        movement_arr = self._extract_movement_batch(case_base_df)
+        prefix_arr = self._extract_prefix_batch(case_base_df)
 
         # Replace NaN with column mean for fitting
         for arr in [context_arr, movement_arr, prefix_arr]:
             col_means = np.nanmean(arr, axis=0)
             col_means = np.where(np.isnan(col_means), 0.0, col_means)
             inds = np.where(np.isnan(arr))
-            arr[inds] = np.take(col_means, inds[1])
+            if inds[0].size > 0:
+                arr[inds] = np.take(col_means, inds[1])
 
         self._context_scaler.fit(context_arr)
         self._movement_scaler.fit(movement_arr)
@@ -326,6 +409,7 @@ class DecisionStateEncoder:
         self._category_to_idx = {c: i for i, c in enumerate(self._category_vocab)}
 
         # Total non-spatial vector dimension
+        movement_dim = 4 * int(self.recent_k)
         self._dim = (
             2  # temporal
             + 2  # context
@@ -396,11 +480,33 @@ class DecisionStateEncoder:
         """Encode all rows into an (N × D) non-spatial matrix."""
         if not self._fitted:
             raise RuntimeError("Encoder not fitted. Call fit() first.")
+        df = case_base_df
+        w = self.weights
 
-        vectors = np.zeros((len(case_base_df), self._dim), dtype=float)
-        for i, (_, row) in enumerate(case_base_df.iterrows()):
-            vectors[i] = self._encode_row(row)
-        return vectors
+        temporal = self._extract_temporal_batch(df)  # (N,2)
+        temporal = self._l2_normalize_rows(temporal) * float(w.temporal)
+
+        context = self._context_scaler.transform(self._extract_context_batch(df))
+        context = self._l2_normalize_rows(context.astype(np.float32, copy=False)) * float(
+            w.local_context
+        )
+
+        movement = self._movement_scaler.transform(self._extract_movement_batch(df))
+        movement = self._l2_normalize_rows(movement.astype(np.float32, copy=False)) * float(
+            w.movement
+        )
+
+        prefix = self._prefix_scaler.transform(self._extract_prefix_batch(df))
+        prefix = self._l2_normalize_rows(prefix.astype(np.float32, copy=False)) * float(
+            w.prefix_summary
+        )
+
+        cat = self._extract_category_onehot_batch(df)
+        if cat.shape[1] > 0:
+            cat = self._l2_normalize_rows(cat) * float(w.category)
+            return np.concatenate([temporal, context, movement, prefix, cat], axis=1)
+
+        return np.concatenate([temporal, context, movement, prefix], axis=1)
 
     # ------------------------------------------------------------------
     # Coordinate extraction (for spatial kernel)
@@ -424,10 +530,9 @@ class DecisionStateEncoder:
         Extract (lat, lon) for all rows as an (N × 2) array.
         Pre-compute this alongside case_vectors for fast retrieval.
         """
-        coords = np.zeros((len(case_base_df), 2), dtype=float)
-        for i, (_, row) in enumerate(case_base_df.iterrows()):
-            coords[i, 0], coords[i, 1] = self._extract_coords(row)
-        return coords
+        lat = self._safe_numeric_col(case_base_df, self.lat_col, default=np.nan)
+        lon = self._safe_numeric_col(case_base_df, self.lon_col, default=np.nan)
+        return np.column_stack([lat, lon]).astype(np.float32)
 
     @property
     def dim(self) -> int:
