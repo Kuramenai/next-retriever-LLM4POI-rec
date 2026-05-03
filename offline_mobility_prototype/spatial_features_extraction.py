@@ -110,6 +110,11 @@ def centroid_displacement_km(lats: np.ndarray, lons: np.ndarray) -> float:
 
 def build_session_spatial_aggregates(
     session_checkins_df: pd.DataFrame,
+    session_id_col: str = "SessionId",
+    checkin_time_col: str = "CheckinTime",
+    poi_id_col: str = "PoiId",
+    poi_latitude_col: str = "Latitude",
+    poi_longitude_col: str = "Longitude",
     region_col: str | None = None,
     h3_resolution: int = 7,
     normalize_entropy: bool = True,
@@ -119,7 +124,7 @@ def build_session_spatial_aggregates(
 
     Required columns:
       - SessionId
-      - Time
+      - CheckinTime
       - Latitude
       - Longitude
 
@@ -132,17 +137,22 @@ def build_session_spatial_aggregates(
       - h3_entropy
       - start_end_centroid_displacement_km
     """
-    required = {"SessionId", "Time", "Latitude", "Longitude"}
+    required = {
+        session_id_col,
+        checkin_time_col,
+        poi_id_col,
+        poi_latitude_col,
+        poi_longitude_col,
+    }
     missing = required - set(session_checkins_df.columns)
     if missing:
         raise ValueError(f"Missing required columns: {sorted(missing)}")
 
     df = session_checkins_df.copy()
-    df["Time"] = pd.to_datetime(df["Time"], errors="raise")
 
-    sort_cols = ["SessionId", "Time"]
-    if "PId" in df.columns:
-        sort_cols.append("PId")
+    sort_cols = [session_id_col, checkin_time_col]
+    if poi_id_col in df.columns:
+        sort_cols.append(poi_id_col)
 
     df = df.sort_values(sort_cols).reset_index(drop=True)
 
@@ -154,16 +164,16 @@ def build_session_spatial_aggregates(
     else:
         df["_region_token"] = [
             h3_cell_from_latlon(lat, lon, resolution=h3_resolution)
-            for lat, lon in zip(df["Latitude"], df["Longitude"])
+            for lat, lon in zip(df[poi_latitude_col], df[poi_longitude_col])
         ]
 
     rows = []
 
-    for session_id, group in df.groupby("SessionId", sort=False):
+    for session_id, group in df.groupby(session_id_col, sort=False):
         g = group.sort_values(sort_cols[1:]).reset_index(drop=True)
 
-        lats = g["Latitude"].astype(float).to_numpy()
-        lons = g["Longitude"].astype(float).to_numpy()
+        lats = g[poi_latitude_col].astype(float).to_numpy()
+        lons = g[poi_longitude_col].astype(float).to_numpy()
         region_tokens = g["_region_token"].tolist()
 
         movement_radius = radius_of_gyration_km(lats, lons)

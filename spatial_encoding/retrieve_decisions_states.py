@@ -19,11 +19,15 @@ Usage:
     encoder.fit(case_base_df)
     case_vectors = encoder.transform(case_base_df)
     case_coords = encoder.extract_coords(case_base_df)
+    retrieval_index = build_retrieval_index(
+        case_base_df=case_base_df,
+        case_vectors=case_vectors,
+        config=config,
+        case_coords=case_coords,
+    )
 
     result = retrieve_similar_decision_states(
-        query_state, case_base_df, encoder, config,
-        case_vectors=case_vectors,
-        case_coords=case_coords,
+        query_state, retrieval_index, encoder, config
     )
 """
 
@@ -42,6 +46,41 @@ from spatial_encoding.extract_poi_spatial_descriptors import SpatialEncodingConf
 
 
 EARTH_RADIUS_M = 6_371_008.8
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+
+def _l2_normalize(vec: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(vec)
+    if norm < 1e-12:
+        return np.zeros_like(vec)
+    return vec / norm
+
+
+def _cosine_similarity_batch(query: np.ndarray, matrix: np.ndarray) -> np.ndarray:
+    """Cosine similarity between a query vector and each row of a matrix."""
+    query_norm = np.linalg.norm(query)
+    if query_norm < 1e-12:
+        return np.zeros(len(matrix), dtype=float)
+
+    row_norms = np.linalg.norm(matrix, axis=1)
+    row_norms = np.where(row_norms < 1e-12, 1.0, row_norms)
+
+    return (matrix @ query) / (row_norms * query_norm)
+
+
+def _time_bin_to_hour(time_bin: str) -> float:
+    """Approximate midpoint hour for a time bin label (fallback only)."""
+    mapping = {
+        "morning": 8.0,
+        "midday": 13.0,
+        "afternoon": 17.0,
+        "evening": 21.0,
+        "night": 2.0,
+    }
+    return mapping.get(str(time_bin), 12.0)
 
 
 # ---------------------------------------------------------------------------
@@ -298,13 +337,17 @@ class DecisionStateEncoder:
         filling NaN with `default`.
         """
         if col not in df.columns:
-            return np.full(len(df), float(default), dtype=np.float32)
-        arr = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=np.float32, copy=False)
+            raise ValueError(f"Column {col} not found in DataFrame.")
+            # return np.full(len(df), float(default), dtype=np.float32)
+        arr = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=np.float32, copy=False)  # fmt: skip
         if np.isnan(arr).any():
-            arr = np.where(np.isnan(arr), float(default), arr).astype(np.float32, copy=False)
+            cprint(f"\n[DEBUG] Found NaN in column {col}", "red")
+            arr = np.where(np.isnan(arr), float(default), arr).astype(np.float32, copy=False)  # fmt: skip
+            cprint(f"[DEBUG] Filled NaN with {default}", "green")
         return arr
 
     def _l2_normalize_rows(self, mat: np.ndarray) -> np.ndarray:
+        mat = np.nan_to_num(mat, nan=0.0, posinf=0.0, neginf=0.0)
         norms = np.linalg.norm(mat, axis=1, keepdims=True)
         norms = np.where(norms < 1e-12, 1.0, norms)
         return mat / norms
@@ -317,11 +360,12 @@ class DecisionStateEncoder:
         if "current_timestamp" in df.columns:
             ts = pd.to_datetime(df["current_timestamp"], errors="coerce")
             hour = ts.dt.hour.astype(float) + ts.dt.minute.astype(float) / 60.0
-            hour = hour.fillna(df.get("current_time_bin", "midday").map(_time_bin_to_hour))  # type: ignore[arg-type]
+            hour = hour.fillna(df.get("current_time_bin", "midday").map(_time_bin_to_hour))  # fmt: skip # type: ignore[arg-type]
             hour = hour.to_numpy(dtype=np.float32)
         else:
-            tbin = df.get("current_time_bin", pd.Series(["midday"] * len(df)))
-            hour = tbin.map(_time_bin_to_hour).to_numpy(dtype=np.float32)  # type: ignore[arg-type]
+            raise ValueError("current_timestamp column not found in DataFrame.")
+            # tbin = df.get("current_time_bin", pd.Series(["midday"] * len(df)))
+            # hour = tbin.map(_time_bin_to_hour).to_numpy(dtype=np.float32)  # type: ignore[arg-type]
 
         angle = 2.0 * np.pi * hour / 24.0
         return np.column_stack([np.sin(angle), np.cos(angle)]).astype(np.float32)
@@ -344,14 +388,23 @@ class DecisionStateEncoder:
             prefix = f"prev{lag}"
             dist = self._safe_numeric_col(df, f"{prefix}_distance_m", default=0.0)
             gap = self._safe_numeric_col(df, f"{prefix}_gap_s", default=0.0)
-            bearing = self._safe_numeric_col(df, f"{prefix}_bearing_deg", default=np.nan)
+            bearing = self._safe_numeric_col(df, f"{prefix}_bearing_deg", default=np.nan)  # fmt: skip
 
             dist = np.log1p(dist)
             gap = np.log1p(gap)
 
             bearing_rad = np.deg2rad(bearing.astype(np.float32, copy=False))
-            sinb = np.sin(np.where(np.isnan(bearing_rad), 0.0, bearing_rad))
-            cosb = np.cos(np.where(np.isnan(bearing_rad), 0.0, bearing_rad))
+
+            valid_bearing = ~np.isnan(bearing_rad)
+
+            sinb = np.zeros_like(bearing_rad, dtype=np.float32)
+            cosb = np.zeros_like(bearing_rad, dtype=np.float32)
+
+            sinb[valid_bearing] = np.sin(bearing_rad[valid_bearing])
+            cosb[valid_bearing] = np.cos(bearing_rad[valid_bearing])
+
+            # sinb = np.sin(np.where(np.isnan(bearing_rad), 0.0, bearing_rad))
+            # cosb = np.cos(np.where(np.isnan(bearing_rad), 0.0, bearing_rad))
 
             parts.extend([dist, gap, sinb.astype(np.float32), cosb.astype(np.float32)])
 
@@ -359,8 +412,10 @@ class DecisionStateEncoder:
 
     def _extract_category_onehot_batch(self, df: pd.DataFrame) -> np.ndarray:
         if not self._category_vocab:
-            return np.zeros((len(df), 0), dtype=np.float32)
+            raise ValueError("Category vocabulary not found. Call fit() first.")
+            # return np.zeros((len(df), 0), dtype=np.float32)
         if "current_category" not in df.columns:
+            raise ValueError("current_category column not found in DataFrame.")
             return np.zeros((len(df), len(self._category_vocab)), dtype=np.float32)
 
         cats = df["current_category"].astype(str)
@@ -384,8 +439,8 @@ class DecisionStateEncoder:
             raise ValueError("Cannot fit encoder on empty case base.")
 
         # Collect raw arrays for each scalable block (vectorized)
-        context_arr = self._extract_context_batch(case_base_df)
-        movement_arr = self._extract_movement_batch(case_base_df)
+        context_arr = self._extract_context_batch(case_base_df)  # fmt: skip # extract density and connectivity
+        movement_arr = self._extract_movement_batch(case_base_df)  # fmt: skip # extract recent movement pattern (k past visited pois)
         prefix_arr = self._extract_prefix_batch(case_base_df)
 
         # Replace NaN with column mean for fitting
@@ -487,14 +542,14 @@ class DecisionStateEncoder:
         temporal = self._l2_normalize_rows(temporal) * float(w.temporal)
 
         context = self._context_scaler.transform(self._extract_context_batch(df))
-        context = self._l2_normalize_rows(context.astype(np.float32, copy=False)) * float(
-            w.local_context
-        )
+        context = self._l2_normalize_rows(
+            context.astype(np.float32, copy=False)
+        ) * float(w.local_context)
 
         movement = self._movement_scaler.transform(self._extract_movement_batch(df))
-        movement = self._l2_normalize_rows(movement.astype(np.float32, copy=False)) * float(
-            w.movement
-        )
+        movement = self._l2_normalize_rows(
+            movement.astype(np.float32, copy=False)
+        ) * float(w.movement)
 
         prefix = self._prefix_scaler.transform(self._extract_prefix_batch(df))
         prefix = self._l2_normalize_rows(prefix.astype(np.float32, copy=False)) * float(
@@ -573,29 +628,27 @@ def build_retrieval_index(
     proto_col: str = "proto_prototype_id",
 ) -> DecisionStateRetrievalIndex:
     """
-    Build a retrieval index once at startup (numpy-first).
+    Build a retrieval index once at startup.
     """
-    if len(case_base_df) == 0:
+    if case_base_df is None or len(case_base_df) == 0:
         raise ValueError("case_base_df is empty; cannot build retrieval index.")
+
+    if config.session_id_col not in case_base_df.columns:
+        raise ValueError(f"case_base_df must contain {config.session_id_col!r} for filtering.")  # fmt: skip
 
     mat = np.asarray(case_vectors, dtype=np.float32)
     if mat.ndim != 2 or mat.shape[0] != len(case_base_df):
-        raise ValueError(
-            f"case_vectors must be shape (N,D) with N=len(case_base_df); got {mat.shape}."
-        )
+        raise ValueError(f"case_vectors must be shape (N,D) with N=len(case_base_df); got {mat.shape}.")  # fmt: skip
 
+    # Normalize the case vectors
     norms = np.linalg.norm(mat, axis=1, keepdims=True)
     norms = np.where(norms < 1e-12, 1.0, norms)
     mat_unit = mat / norms
 
-    if config.session_id_col not in case_base_df.columns:
-        raise ValueError(
-            f"case_base_df must contain {config.session_id_col!r} for filtering."
-        )
     session_ids = case_base_df[config.session_id_col].to_numpy()
 
     if proto_col in case_base_df.columns:
-        prototype_ids = pd.to_numeric(case_base_df[proto_col], errors="coerce").to_numpy()
+        prototype_ids = pd.to_numeric(case_base_df[proto_col], errors="coerce").to_numpy()  # fmt: skip
     else:
         prototype_ids = np.full(len(case_base_df), np.nan, dtype=float)
 
@@ -615,7 +668,7 @@ def build_retrieval_index(
     else:
         coords_arr = np.asarray(case_coords, dtype=np.float32)
         if coords_arr.shape != (len(case_base_df), 2):
-            raise ValueError(f"case_coords must have shape (N,2); got {coords_arr.shape}.")
+            raise ValueError(f"case_coords must have shape (N,2); got {coords_arr.shape}.")  # fmt: skip
         # Precompute radians once to avoid per-query np.radians over large arrays
         coords_rad = np.radians(coords_arr.astype(np.float64)).astype(np.float32)
 
@@ -632,21 +685,19 @@ def build_retrieval_index(
 
 
 # ---------------------------------------------------------------------------
-# Retrieval (public API; can use index fast-path)
+# Retrieval (public API; requires pre-built index)
 # ---------------------------------------------------------------------------
+
 
 def retrieve_similar_decision_states(
     query_state: Union[pd.Series, pd.DataFrame],
-    case_base_df: pd.DataFrame,
+    retrieval_index: DecisionStateRetrievalIndex,
     encoder: DecisionStateEncoder,
     config,
     *,
-    retrieval_index: Optional[DecisionStateRetrievalIndex] = None,
-    case_vectors: Optional[np.ndarray] = None,
-    case_coords: Optional[np.ndarray] = None,
-    top_k: int = 50,
-    same_prototype_only: bool = True,
-    prototype_union_k: int = 1,
+    top_k: int = 20,
+    same_prototype_only: bool = False,
+    prototype_union_k: int = 3,
     exclude_same_session: bool = True,
 ) -> pd.DataFrame:
     """
@@ -665,15 +716,11 @@ def retrieve_similar_decision_states(
     ----------
     query_state : Series or single-row DataFrame
         Output of build_current_decision_state().
-    case_base_df : DataFrame
-        Full training decision-state table.
+    retrieval_index : DecisionStateRetrievalIndex
+        Built once via ``build_retrieval_index`` (unit vectors, coords, filters).
     encoder : DecisionStateEncoder
         Fitted encoder.
     config : SpatialEncodingConfig
-    case_vectors : ndarray, optional
-        Pre-computed encoder.transform(case_base_df). Shape (N, D).
-    case_coords : ndarray, optional
-        Pre-computed encoder.extract_coords(case_base_df). Shape (N, 2).
     top_k : int
     same_prototype_only : bool
     prototype_union_k : int
@@ -700,245 +747,101 @@ def retrieve_similar_decision_states(
         raise TypeError("query_state must be a pandas Series or single-row DataFrame.")
 
     # ------------------------------------------------------------------
-    # Fast path: use pre-built retrieval index (avoid pandas until the end)
+    # Pre-built retrieval index (numpy-heavy path; pandas only for output rows)
     # ------------------------------------------------------------------
-    if retrieval_index is not None:
-        idx = retrieval_index
-        if len(idx.case_base_df) == 0:
-            return idx.case_base_df.copy()
+    idx = retrieval_index
+    if len(idx.case_base_df) == 0:
+        raise ValueError("case_base_df is empty; cannot retrieve similar decision states.")  # fmt: skip
 
-        cand_idx = idx.all_idx
-
-        # Prototype bucket(s): hard top-1 or union of top-M router outputs
-        if same_prototype_only:
-            union_k = max(int(prototype_union_k), 1)
-            proto_ids: list[int] = []
-
-            # Prefer router top-M outputs when available (proto_top{i}_prototype_id)
-            for i in range(1, union_k + 1):
-                v = q.get(f"proto_top{i}_prototype_id", np.nan)
-                if pd.notna(v):
-                    try:
-                        proto_ids.append(int(v))
-                    except Exception:
-                        pass
-
-            # Fallback to single routed prototype id
-            if not proto_ids:
-                v = q.get("proto_prototype_id", np.nan)
-                if pd.notna(v):
-                    try:
-                        proto_ids.append(int(v))
-                    except Exception:
-                        pass
-
-            if proto_ids:
-                buckets = [idx.prototype_to_indices.get(p) for p in dict.fromkeys(proto_ids)]
-                buckets = [b for b in buckets if b is not None and b.size > 0]
-                if buckets:
-                    cand_idx = np.unique(np.concatenate(buckets))
-
-        if exclude_same_session and config.session_id_col in q.index:
-            qsid = q[config.session_id_col]
-            cand_idx = cand_idx[idx.session_ids[cand_idx] != qsid]
-
-        if cand_idx.size == 0:
-            out = idx.case_base_df.iloc[[]].copy()
-            out["retrieval_score"] = []
-            out["spatial_score"] = []
-            out["cosine_score"] = []
-            return out
-
-        # cosine over pre-normalized case vectors
-        qvec = np.asarray(encoder.transform_single(q), dtype=np.float32)
-        qnorm = np.linalg.norm(qvec)
-        if qnorm > 1e-12:
-            qvec = qvec / qnorm
-        cosine_scores = idx.case_vectors_unit[cand_idx] @ qvec
-
-        # spatial kernel (optional coords)
-        query_lat, query_lon = encoder.extract_coords_single(q)
-        if idx.case_coords is None or np.isnan(query_lat) or np.isnan(query_lon):
-            spatial_scores = np.zeros(len(cand_idx), dtype=np.float32)
-        else:
-            # Prefer precomputed radians to avoid per-query np.radians over candidate arrays
-            if idx.case_coords_rad is not None:
-                coords_r = idx.case_coords_rad[cand_idx]
-                lat1_r = float(np.radians(query_lat))
-                lon1_r = float(np.radians(query_lon))
-                distances_m = _haversine_one_to_many_m_from_radians(
-                    lat1_r, lon1_r, coords_r[:, 0], coords_r[:, 1]
-                )
-            else:
-                coords = idx.case_coords[cand_idx]
-                distances_m = _haversine_one_to_many_m(
-                    query_lat, query_lon, coords[:, 0], coords[:, 1]
-                )
-            tau = float(encoder.spatial_kernel.tau_m)
-            spatial_scores = np.exp(-distances_m / tau).astype(np.float32)
-            spatial_scores = np.where(np.isnan(spatial_scores), 0.0, spatial_scores)
-
-        alpha = float(encoder.weights.spatial_alpha)
-        combined_scores = alpha * spatial_scores + (1.0 - alpha) * cosine_scores
-
-        if len(cand_idx) > top_k:
-            local = np.argpartition(combined_scores, -top_k)[-top_k:]
-            local = local[np.argsort(combined_scores[local])[::-1]]
-        else:
-            local = np.argsort(combined_scores)[::-1]
-
-        rows = cand_idx[local]
-        out = idx.case_base_df.iloc[rows].copy()
-        out["retrieval_score"] = combined_scores[local]
-        out["spatial_score"] = spatial_scores[local]
-        out["cosine_score"] = cosine_scores[local]
-        return out.reset_index(drop=True)
-
-    # ------------------------------------------------------------------
-    # Reference path (older behavior)
-    # ------------------------------------------------------------------
-    cands = case_base_df.copy()
-    if len(cands) == 0:
-        return cands
-
-    # ------------------------------------------------------------------
-    # Hard filters
-    # ------------------------------------------------------------------
-    session_col = config.session_id_col
-    proto_col = "proto_prototype_id"
-
-    filter_mask = pd.Series(True, index=cands.index)
-
-    if exclude_same_session and session_col in q.index and session_col in cands.columns:
-        filter_mask &= cands[session_col] != q[session_col]
-
-    if same_prototype_only and proto_col in cands.columns:
+    cand_idx = idx.all_idx
+    # Prototype bucket(s): hard top-1 or union of top-M router outputs
+    if same_prototype_only:
         union_k = max(int(prototype_union_k), 1)
-        proto_vals: list[int] = []
+        proto_ids: list[int] = []
+
+        # Prefer router top-M outputs when available (proto_top{i}_prototype_id)
         for i in range(1, union_k + 1):
             v = q.get(f"proto_top{i}_prototype_id", np.nan)
             if pd.notna(v):
                 try:
-                    proto_vals.append(int(v))
+                    proto_ids.append(int(v))
                 except Exception:
                     pass
-        if not proto_vals and proto_col in q.index and pd.notna(q[proto_col]):
-            try:
-                proto_vals.append(int(q[proto_col]))
-            except Exception:
-                proto_vals = []
 
-        if proto_vals:
-            proto_mask = cands[proto_col].isin(proto_vals)
-            if proto_mask.any():
-                filter_mask &= proto_mask
+        # Fallback to single routed prototype id
+        if not proto_ids:
+            v = q.get("proto_prototype_id", np.nan)
+            if pd.notna(v):
+                try:
+                    proto_ids.append(int(v))
+                except Exception:
+                    pass
 
-    filter_np = filter_mask.to_numpy()
-    cands = cands.loc[filter_mask].copy()
-    if len(cands) == 0:
-        cands["retrieval_score"] = []
-        cands["spatial_score"] = []
-        cands["cosine_score"] = []
-        return cands
+        if proto_ids:
+            buckets = [
+                idx.prototype_to_indices.get(p) for p in dict.fromkeys(proto_ids)
+            ]
+            buckets = [b for b in buckets if b is not None and b.size > 0]
+            if buckets:
+                cand_idx = np.unique(np.concatenate(buckets))
 
-    # ------------------------------------------------------------------
-    # Non-spatial cosine similarity
-    # ------------------------------------------------------------------
-    query_vec = encoder.transform_single(q)
+    if exclude_same_session and config.session_id_col in q.index:
+        cprint("Excluding same session...", "green")
+        qsid = q[config.session_id_col]
+        cand_idx = cand_idx[idx.session_ids[cand_idx] != qsid]
 
-    if case_vectors is not None:
-        filtered_vectors = case_vectors[filter_np]
-    else:
-        filtered_vectors = encoder.transform(cands)
+    if cand_idx.size == 0:
+        cprint("No similar decision states found.", "red")
+        out = idx.case_base_df.iloc[[]].copy()
+        out["retrieval_score"] = []
+        out["spatial_score"] = []
+        out["cosine_score"] = []
+        return out
 
-    cosine_scores = _cosine_similarity_batch(query_vec, filtered_vectors)
+    # cosine over pre-normalized case vectors
+    qvec = np.asarray(encoder.transform_single(q), dtype=np.float32)
+    qnorm = np.linalg.norm(qvec)
+    if qnorm > 1e-12:
+        qvec = qvec / qnorm
+    cosine_scores = idx.case_vectors_unit[cand_idx] @ qvec
 
-    # ------------------------------------------------------------------
-    # Spatial similarity via haversine kernel
-    # ------------------------------------------------------------------
+    # spatial kernel (optional coords)
     query_lat, query_lon = encoder.extract_coords_single(q)
-
-    if case_coords is not None:
-        filtered_coords = case_coords[filter_np]
+    if idx.case_coords is None or np.isnan(query_lat) or np.isnan(query_lon):
+        spatial_scores = np.zeros(len(cand_idx), dtype=np.float32)
     else:
-        filtered_coords = encoder.extract_coords(cands)
-
-    if np.isnan(query_lat) or np.isnan(query_lon):
-        # No spatial info available — fall back to cosine only
-        spatial_scores = np.zeros(len(cands), dtype=float)
-    else:
-        distances_m = _haversine_one_to_many_m(
-            query_lat,
-            query_lon,
-            filtered_coords[:, 0],
-            filtered_coords[:, 1],
-        )
-        tau = encoder.spatial_kernel.tau_m
-        spatial_scores = np.exp(-distances_m / tau)
-        # NaN coords in case base → zero spatial score
+        # Prefer precomputed radians to avoid per-query np.radians over candidate arrays
+        if idx.case_coords_rad is not None:
+            coords_r = idx.case_coords_rad[cand_idx]
+            lat1_r = float(np.radians(query_lat))
+            lon1_r = float(np.radians(query_lon))
+            distances_m = _haversine_one_to_many_m_from_radians(
+                lat1_r, lon1_r, coords_r[:, 0], coords_r[:, 1]
+            )
+        else:
+            coords = idx.case_coords[cand_idx]
+            distances_m = _haversine_one_to_many_m(
+                query_lat, query_lon, coords[:, 0], coords[:, 1]
+            )
+        tau = float(encoder.spatial_kernel.tau_m)
+        spatial_scores = np.exp(-distances_m / tau).astype(np.float32)
         spatial_scores = np.where(np.isnan(spatial_scores), 0.0, spatial_scores)
 
-    # ------------------------------------------------------------------
-    # Combine scores
-    # ------------------------------------------------------------------
-    alpha = encoder.weights.spatial_alpha
-
+    alpha = float(encoder.weights.spatial_alpha)
     combined_scores = alpha * spatial_scores + (1.0 - alpha) * cosine_scores
 
-    cands = cands.copy()
-    cands["retrieval_score"] = combined_scores
-    cands["spatial_score"] = spatial_scores
-    cands["cosine_score"] = cosine_scores
-
-    # ------------------------------------------------------------------
-    # Select top-k
-    # ------------------------------------------------------------------
-    if len(cands) <= top_k:
-        out = cands.sort_values("retrieval_score", ascending=False).reset_index(
-            drop=True
-        )
+    if len(cand_idx) > top_k:
+        local = np.argpartition(combined_scores, -top_k)[-top_k:]
+        local = local[np.argsort(combined_scores[local])[::-1]]
     else:
-        top_indices = np.argpartition(combined_scores, -top_k)[-top_k:]
-        top_indices = top_indices[np.argsort(combined_scores[top_indices])[::-1]]
-        out = cands.iloc[top_indices].reset_index(drop=True)
+        local = np.argsort(combined_scores)[::-1]
 
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------------
-
-
-def _l2_normalize(vec: np.ndarray) -> np.ndarray:
-    norm = np.linalg.norm(vec)
-    if norm < 1e-12:
-        return np.zeros_like(vec)
-    return vec / norm
-
-
-def _cosine_similarity_batch(query: np.ndarray, matrix: np.ndarray) -> np.ndarray:
-    """Cosine similarity between a query vector and each row of a matrix."""
-    query_norm = np.linalg.norm(query)
-    if query_norm < 1e-12:
-        return np.zeros(len(matrix), dtype=float)
-
-    row_norms = np.linalg.norm(matrix, axis=1)
-    row_norms = np.where(row_norms < 1e-12, 1.0, row_norms)
-
-    return (matrix @ query) / (row_norms * query_norm)
-
-
-def _time_bin_to_hour(time_bin: str) -> float:
-    """Approximate midpoint hour for a time bin label (fallback only)."""
-    mapping = {
-        "morning": 8.0,
-        "midday": 13.0,
-        "afternoon": 17.0,
-        "evening": 21.0,
-        "night": 2.0,
-    }
-    return mapping.get(str(time_bin), 12.0)
+    rows = cand_idx[local]
+    out = idx.case_base_df.iloc[rows].copy()
+    out["retrieval_score"] = combined_scores[local]
+    out["spatial_score"] = spatial_scores[local]
+    out["cosine_score"] = cosine_scores[local]
+    return out.reset_index(drop=True)
 
 
 if __name__ == "__main__":
@@ -961,3 +864,16 @@ if __name__ == "__main__":
 
     with open(scrip_dir / f"artifacts/{city}/{city}_case_encoder.pkl", "wb") as f:
         pickle.dump(encoder, f)
+
+    sample = decision_state_table_df.sample(min(200, len(decision_state_table_df)), random_state=42).reset_index(drop=True)  # fmt: skip
+
+    X_batch = encoder.transform(sample)
+
+    for i in range(len(sample)):
+        x_single = encoder.transform_single(sample.iloc[i])
+        if not np.allclose(X_batch[i], x_single, atol=1e-5, equal_nan=True):
+            print("Mismatch at row", i)
+            print("Session:", sample.iloc[i].get(config.session_id_col))
+            break
+    else:
+        print("Batch and single-row encodings are consistent.")

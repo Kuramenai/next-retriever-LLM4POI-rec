@@ -264,7 +264,7 @@ def make_vllm_batch_generate_fn(
 
     def batch_generate(system_prompts: list[str], user_prompts: list[str]) -> list[str]:
         if len(system_prompts) != len(user_prompts):
-            raise ValueError("system_prompts and user_prompts must have the same length.")
+            raise ValueError("system_prompts and user_prompts must have the same length.")  # fmt: skip
         if len(system_prompts) == 0:
             return []
 
@@ -329,16 +329,9 @@ if __name__ == "__main__":
         features = pickle.load(f)
 
     poi_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi_meta.csv")
-    poi_descriptor_df = pd.read_csv(
-        scrip_dir / f"artifacts/{city}/{city}_poi_descriptor.csv"
-    )
-    pair_lookup_df = pd.read_csv(
-        scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv"
-    )
-
-    decision_state_case_base_df = pd.read_csv(
-        scrip_dir / f"artifacts/{city}/{city}_decision_state_table.csv"
-    )
+    poi_descriptor_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi_descriptor.csv")  # fmt: skip
+    pair_lookup_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv")  # fmt: skip
+    decision_state_case_base_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_decision_state_table.csv")  # fmt: skip
 
     cprint("Loading fitted GMM", "yellow")
     with open(scrip_dir / f"artifacts/{city}/{city}_gmm_cluster.pkl", "rb") as f:
@@ -346,23 +339,11 @@ if __name__ == "__main__":
     fitted_gmm = gmm["model"]
 
     cprint("Preparing online clustering", "yellow")
-    frozen_module1_transformer = (
-        FrozenModule1PrefixTransformer.from_feature_blocks_output(features)
-    )
+    frozen_module1_transformer = FrozenModule1PrefixTransformer.from_feature_blocks_output(features)  # fmt: skip
 
-    cprint("Loading encoder, cases vectors and coords...", "yellow")
-    # with open(scrip_dir / f"artifacts/{city}/{city}_case_vectors.pkl", "rb") as f:
-    #     case_vectors = pickle.load(f)
-
-    # with open(scrip_dir / f"artifacts/{city}/{city}_case_coords.pkl", "rb") as f:
-    #     case_coords = pickle.load(f)
-
-    # with open(scrip_dir / f"artifacts/{city}/{city}_case_encoder.pkl", "rb") as f:
-    #     encoder = pickle.load(f)
+    cprint("Building retrieval index...", "yellow")
     encoder = DecisionStateEncoder(config)
-    case_vectors, case_coords = build_retrieval_caches(
-        decision_state_case_base_df, encoder
-    )
+    case_vectors, case_coords = build_retrieval_caches(decision_state_case_base_df, encoder)  # fmt: skip
     retrieval_index = build_retrieval_index(
         case_base_df=decision_state_case_base_df,
         case_vectors=case_vectors,
@@ -399,11 +380,8 @@ if __name__ == "__main__":
     # Build a single shared vLLM engine.
     llm = LLM(model=model_path, trust_remote_code=True)
 
-    # Single-prompt generation (works, but slower throughput)
-    # llm_generate_fn = make_vllm_generate_fn(model_path=model_path)
-
     # Batched generation (recommended for speed)
-    llm_batch_generate_fn = make_vllm_batch_generate_fn(llm, temperature=0.2, max_tokens=1024)
+    llm_batch_generate_fn = make_vllm_batch_generate_fn(llm, temperature=0.2, max_tokens=1024)  # fmt: skip
     llm_parse_fn = parse_llm_selected_poi_id
 
     pipeline = NextPOIEndToEndPipeline(
@@ -415,39 +393,24 @@ if __name__ == "__main__":
     cprint("Inference", "yellow")
     test_sample_df = pd.read_csv(scrip_dir / f"data/{city}/test_sample.csv")
 
-    # One session: slice a single SessionId, then predict last POI.
-    # sid = test_sample_df[config.session_id_col].iloc[0]
-    # one_session = test_sample_df[
-    #     test_sample_df[config.session_id_col] == sid
-    # ].copy()
-    # out = pipeline.predict_from_full_test_session(one_session)
-
-    # All sessions in test_sample_df (one next-step prediction per session),
-    # batching the LLM decoding via vLLM.
-    # batch_results, prompts_responses = pipeline.predict_batch_from_test_checkins_batched_llm(
-    #     test_sample_df,
-    #     llm_batch_generate_fn=llm_batch_generate_fn,
-    #     min_checkins=2,
-    #     include_details=False,
-    #     show_progress=True,
-    # )
     batch_results = pipeline.predict_batch_from_test_checkins_batched_retrieval_and_llm(
-    test_sample_df,
-    llm_batch_generate_fn=llm_batch_generate_fn,
-    min_checkins=2,
-    prompt_workers=16,          # try 4/8 later
-    retrieval_preselect_factor=5,
-    use_torch_cuda=True,      # try True if torch+cuda available
-)
-    evaluated = batch_results.loc[~batch_results["skipped"] & batch_results["error"].isna()]
+        test_sample_df,
+        llm_batch_generate_fn=llm_batch_generate_fn,
+        min_checkins=2,
+        prompt_workers=16,  # try 4/8 later
+        retrieval_preselect_factor=5,
+        use_torch_cuda=True,  # try True if torch+cuda available
+    )
+
+    evaluated = batch_results.loc[~batch_results["skipped"] & batch_results["error"].isna()]  # fmt: skip
     if len(evaluated) > 0:
         acc = float(evaluated["is_correct_at_1"].mean())
         cprint(f"Hit@1 over {len(evaluated)} sessions: {acc:.4f}", "green")
     out_path = scrip_dir / f"artifacts/{city}/{city}_batch_inference_results.csv"
     batch_results.to_csv(out_path, index=False)
     cprint(f"Wrote batch results to {out_path}", "green")
-    
+
     cprint("Writing prompts and responses to file", "yellow")
-    out_path = scrip_dir / f"artifacts/{city}/{city}_batch_inference_prompts_responses.csv"
+    out_path = (scrip_dir / f"artifacts/{city}/{city}_batch_inference_prompts_responses.csv")  # fmt: skip
     # prompts_responses.to_csv(out_path, index=False)
     cprint(f"Wrote prompts and responses to {out_path}", "green")

@@ -3,9 +3,142 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from sklearn.mixture import GaussianMixture
-from features_extraction import build_feature_blocks
 from termcolor import cprint
 from tqdm import tqdm
+from collections import Counter
+
+
+import hdbscan
+
+try:
+    # When imported as a package module.
+    from .features_extraction import build_feature_blocks  # type: ignore
+except Exception:
+    # When executed as a script from within this folder.
+    from features_extraction import build_feature_blocks
+
+pd.set_option("future.no_silent_downcasting", True)
+
+
+def suggest_k_hdbscan(
+    X: np.ndarray,
+    *,
+    min_cluster_sizes: tuple[int, ...] | None = None,
+    min_samples_values: tuple[int | None, ...] = (None,),
+    metric: str = "euclidean",
+) -> dict:
+    """
+    Use HDBSCAN as a diagnostic to suggest a plausible number of clusters (K).
+
+    Notes
+    -----
+    - HDBSCAN can label points as noise (-1). We report cluster counts excluding noise.
+    - The number of clusters is sensitive to hyperparameters; treat output as a guide.
+
+    Returns
+    -------
+    dict with:
+      - suggested_k (int | None)
+      - suggested_k_range (tuple[int, int] | None)
+      - suggested_candidate_K (tuple[int, ...] | None)
+      - diagnostics (pd.DataFrame)
+    """
+    if X.ndim != 2:
+        raise ValueError("X must be a 2D array")
+    n = int(X.shape[0])
+    if n < 5:
+        return {
+            "suggested_k": None,
+            "suggested_k_range": None,
+            "suggested_candidate_K": None,
+            "diagnostics": pd.DataFrame(
+                [{"n_samples": n, "error": "Too few samples for HDBSCAN diagnostic"}]
+            ),
+        }
+
+    if min_cluster_sizes is None:
+        # Heuristic defaults that scale with dataset size.
+        # Keep small values too, otherwise HDBSCAN may return 0 clusters on small sets.
+        # min_cluster_sizes = tuple(
+        #     sorted(
+        #         {
+        #             max(5, int(0.01 * n)),
+        #             max(8, int(0.02 * n)),
+        #             max(12, int(0.03 * n)),
+        #             max(20, int(0.05 * n)),
+        #         }
+        #     )
+        # )
+        min_cluster_sizes = (10, 20, 50, 100, 200, 300)
+        min_samples_values = (5, 10, 15)
+
+    rows: list[dict] = []
+    for mcs in tqdm(min_cluster_sizes, desc="Testing min_cluster_sizes"):
+        for ms in min_samples_values:
+            clusterer = hdbscan.HDBSCAN(
+                min_cluster_size=int(mcs),
+                min_samples=ms,
+                metric=metric,
+                prediction_data=False,
+            )
+            labels = clusterer.fit_predict(X)
+            labels = np.asarray(labels, dtype=int)
+
+            noise = int(np.sum(labels == -1))
+            noise_frac = float(noise / n)
+            unique = sorted(set(labels.tolist()))
+            clusters = [c for c in unique if c != -1]
+            k = int(len(clusters))
+            rows.append(
+                {
+                    "min_cluster_size": int(mcs),
+                    "min_samples": None if ms is None else int(ms),
+                    "metric": str(metric),
+                    "n_samples": n,
+                    "n_clusters_excluding_noise": k,
+                    "noise_frac": noise_frac,
+                }
+            )
+
+    diagnostics = pd.DataFrame(rows).sort_values(
+        by=["n_clusters_excluding_noise", "noise_frac", "min_cluster_size"],
+        ascending=[False, True, True],
+    )
+
+    ks = [
+        int(v) for v in diagnostics["n_clusters_excluding_noise"].tolist() if int(v) > 0
+    ]
+    if not ks:
+        return {
+            "suggested_k": None,
+            "suggested_k_range": None,
+            "suggested_candidate_K": None,
+            "diagnostics": diagnostics,
+        }
+
+    # Robust suggested K: mode over the grid; break ties by choosing the smaller K.
+    counts = Counter(ks)
+    max_count = max(counts.values())
+    modes = sorted([k for k, c in counts.items() if c == max_count])
+    suggested_k = int(modes[0])
+
+    k_min = int(min(ks))
+    k_max = int(max(ks))
+    suggested_k_range = (k_min, k_max)
+
+    # Build a compact candidate_K tuple around the suggested_k.
+    # (Clip to >=2; include a small spread for BIC search.)
+    cand = sorted(
+        {max(2, suggested_k + d) for d in (-10, -5, -2, 0, 2, 5, 10)}
+        | {max(2, k_min), max(2, k_max)}
+    )
+
+    return {
+        "suggested_k": suggested_k,
+        "suggested_k_range": suggested_k_range,
+        "suggested_candidate_K": tuple(int(x) for x in cand),
+        "diagnostics": diagnostics,
+    }
 
 
 def _top_m_from_proba(proba: np.ndarray, top_m: int) -> tuple[np.ndarray, np.ndarray]:
@@ -46,7 +179,8 @@ def _build_assignment_table(
     df["prototype_confidence"] = max_probs.astype(np.float32)
     df["prototype_top2_gap"] = top2_gap.astype(np.float32)
 
-    for j in range(top_m):
+    m = int(min(top_m, proba.shape[1]))
+    for j in range(m):
         df[f"top{j + 1}_prototype_id"] = top_ids[:, j].astype(int)
         df[f"top{j + 1}_prototype_prob"] = top_scores[:, j].astype(np.float32)
 
@@ -102,6 +236,9 @@ def fit_gmm_prototypes(
     best_model = None
     best_config = None
     best_bic = np.inf
+    best_converged_model = None
+    best_converged_config = None
+    best_converged_bic = np.inf
 
     for covariance_type in tqdm(
         candidate_covariance_types,
@@ -109,7 +246,12 @@ def fit_gmm_prototypes(
         total=len(candidate_covariance_types),
         desc="Finding best covariance type",
     ):
-        for K in candidate_K:
+        for K in tqdm(
+            candidate_K,
+            dynamic_ncols=True,
+            total=len(candidate_K),
+            desc="Finding best K",
+        ):
             try:
                 gmm = GaussianMixture(
                     n_components=K,
@@ -151,6 +293,15 @@ def fit_gmm_prototypes(
                         "bic": float(bic),
                         "aic": float(aic),
                     }
+                if bool(gmm.converged_) and bic < best_converged_bic:
+                    best_converged_bic = bic
+                    best_converged_model = gmm
+                    best_converged_config = {
+                        "K": K,
+                        "covariance_type": covariance_type,
+                        "bic": float(bic),
+                        "aic": float(aic),
+                    }
 
             except Exception as e:
                 model_rows.append(
@@ -167,10 +318,13 @@ def fit_gmm_prototypes(
                     }
                 )
 
+    # Prefer a converged solution when available; fall back to best BIC overall.
+    if best_converged_model is not None:
+        best_model = best_converged_model
+        best_config = best_converged_config
+
     if best_model is None:
-        raise RuntimeError(
-            "All GMM fits failed. Check feature matrix scale or reduce model complexity."
-        )
+        raise RuntimeError("All GMM fits failed. Check feature matrix scale or reduce model complexity.")  # fmt: skip
 
     model_selection_df = (
         pd.DataFrame(model_rows)
@@ -203,7 +357,7 @@ def fit_gmm_prototypes(
     # Prototype summary
     # ------------------------------------------------------------
     hard_train_labels = train_proba.argmax(axis=1)
-    hard_counts = pd.Series(hard_train_labels).value_counts().sort_index()
+    # hard_counts = pd.Series(hard_train_labels).value_counts().sort_index()
 
     prototype_rows = []
     for k in range(best_model.n_components):
@@ -258,37 +412,24 @@ if __name__ == "__main__":
     cprint("Loading check-in data...", "yellow")
 
     city = "nyc"
-    out_dir = Path(__file__).resolve().parent.parent / f"data/{city}"
+    run_hdbscan_k_diagnostic = False
+    scrip_dir = Path(__file__).resolve().parent.parent
+    out_dir = scrip_dir / f"data/{city}"
     train_checkins = pd.read_csv(out_dir / "train_sample.csv")
     val_checkins = pd.read_csv(out_dir / "validate_sample_with_traj.csv")
     test_checkins = pd.read_csv(out_dir / "test_sample.csv")
 
-    train_checkins = train_checkins.rename(
-        columns={
-            "pseudo_session_trajectory_id": "SessionId",
-            "PoiCategoryId": "PId",
-            "PoiCategoryName": "Category",
-        }
-    )
-    train_checkins["Time"] = pd.to_datetime(train_checkins["UTCTimeOffset"])
+    session_id_col_mapping = {
+        "pseudo_session_trajectory_id": "SessionId",
+    }
+    train_checkins = train_checkins.rename(columns=session_id_col_mapping)
+    train_checkins["CheckinTime"] = pd.to_datetime(train_checkins["UTCTimeOffset"])
 
-    val_checkins = val_checkins.rename(
-        columns={
-            "pseudo_session_trajectory_id": "SessionId",
-            "PoiCategoryId": "PId",
-            "PoiCategoryName": "Category",
-        }
-    )
-    val_checkins["Time"] = pd.to_datetime(val_checkins["UTCTimeOffset"])
+    val_checkins = val_checkins.rename(columns=session_id_col_mapping)
+    val_checkins["CheckinTime"] = pd.to_datetime(val_checkins["UTCTimeOffset"])
 
-    test_checkins = test_checkins.rename(
-        columns={
-            "pseudo_session_trajectory_id": "SessionId",
-            "PoiCategoryId": "PId",
-            "PoiCategoryName": "Category",
-        }
-    )
-    test_checkins["Time"] = pd.to_datetime(test_checkins["UTCTimeOffset"])
+    test_checkins = test_checkins.rename(columns=session_id_col_mapping)
+    test_checkins["CheckinTime"] = pd.to_datetime(test_checkins["UTCTimeOffset"])
 
     cprint("Check-in data loaded successfully.", "green")
 
@@ -298,11 +439,29 @@ if __name__ == "__main__":
         val_checkins=val_checkins,
         test_checkins=test_checkins,
         taxonomy_level="raw",
-        absorb_transit=True,
-        absorb_neutral=True,
+        absorb_transit=False,
+        absorb_neutral=False,
+        category_svd_components=32,
     )
 
     cprint("Feature blocks built successfully.", "green")
+
+    if run_hdbscan_k_diagnostic:
+        cprint("HDBSCAN diagnostic: suggesting K...", "yellow")
+        try:
+            k_diag = suggest_k_hdbscan(feature_data["train"]["X"])
+            cprint(
+                f"  suggested_k={k_diag['suggested_k']}, "
+                f"suggested_k_range={k_diag['suggested_k_range']}, "
+                f"suggested_candidate_K={k_diag['suggested_candidate_K']}",
+                "cyan",
+            )
+            diag_path = scrip_dir / f"artifacts/{city}/{city}_hdbscan_k_diagnostic.csv"
+            diag_path.parent.mkdir(parents=True, exist_ok=True)
+            k_diag["diagnostics"].to_csv(diag_path, index=False)
+            cprint(f"  wrote diagnostics to {diag_path}", "green")
+        except Exception as e:
+            cprint(f"HDBSCAN diagnostic failed: {e!r}", "red")
 
     cprint("Fitting GMM prototypes...", "yellow")
     gmm_data = fit_gmm_prototypes(
@@ -312,6 +471,10 @@ if __name__ == "__main__":
         val_meta=feature_data["val"]["meta"],
         X_test=feature_data["test"]["X"],
         test_meta=feature_data["test"]["meta"],
+        candidate_K=(8, 10, 12, 15, 20),
+        candidate_covariance_types=("spherical", "diag", "tied"),
+        reg_covar=1e-4,
+        top_m=3,
     )
 
     cprint("GMM prototypes fitted successfully.", "green")
@@ -324,13 +487,13 @@ if __name__ == "__main__":
     print(gmm_data["prototype_summary"].head())
 
     cprint("Saving GMM data", "yellow")
-    gmm_path = Path(f"artifacts/{city}/{city}_gmm_cluster.pkl")
+    gmm_path = scrip_dir / f"artifacts/{city}/{city}_gmm_cluster.pkl"
     gmm_path.parent.mkdir(parents=True, exist_ok=True)
     with gmm_path.open("wb") as f:
         pickle.dump(gmm_data, f)
 
     cprint("Saving features", "yellow")
-    features_path = Path(f"artifacts/{city}/{city}_features.pkl")
+    features_path = scrip_dir / f"artifacts/{city}/{city}_features.pkl"
     features_path.parent.mkdir(parents=True, exist_ok=True)
     with features_path.open("wb") as f:
         pickle.dump(feature_data, f)

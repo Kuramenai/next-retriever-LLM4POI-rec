@@ -11,6 +11,8 @@ import pickle
 from pathlib import Path
 import pandas as pd
 import numpy as np
+from tqdm import tqdm
+from termcolor import cprint
 
 from offline_mobility_prototype.prefix_feature_transformer import (
     FrozenModule1PrefixTransformer,
@@ -19,7 +21,10 @@ from offline_mobility_prototype.prefix_feature_transformer import (
 from spatial_encoding.extract_poi_spatial_descriptors import SpatialEncodingConfig
 from spatial_encoding.retrieve_decisions_states import DecisionStateEncoder
 from spatial_encoding.session_decision_state_table import build_current_decision_state
-from spatial_encoding.retrieve_decisions_states import retrieve_similar_decision_states
+from spatial_encoding.retrieve_decisions_states import (
+    retrieve_similar_decision_states,
+    _haversine_one_to_many_m_from_radians,
+)  # fmt: skipz
 from spatial_encoding.retrieve_candidates_pois import (
     aggregate_candidate_pois_from_retrieved_cases,
 )
@@ -207,9 +212,7 @@ class NextPOIEndToEndPipeline:
     ) -> tuple[pd.DataFrame, pd.Series]:
         config = self.assets.config
         work = full_session_df.copy()
-        work[config.timestamp_col] = pd.to_datetime(
-            work[config.timestamp_col], errors="coerce"
-        )
+        work[config.timestamp_col] = pd.to_datetime(work[config.timestamp_col], errors="coerce")  # fmt: skip
         work = work.sort_values(config.timestamp_col).reset_index(drop=True)
 
         if config.session_id_col in work.columns:
@@ -236,6 +239,7 @@ class NextPOIEndToEndPipeline:
         prefix_df: pd.DataFrame,
     ) -> dict:
         if self.assets.prototype_router is None:
+            cprint("[DEBUG] No prototype router found", "red")
             return {}
 
         return dict(self.assets.prototype_router.predict_prefix(prefix_df))
@@ -271,11 +275,8 @@ class NextPOIEndToEndPipeline:
 
         return retrieve_similar_decision_states(
             query_state=current_state_df,
-            case_base_df=self.assets.decision_state_case_base_df,
-            encoder=self.assets.decision_state_encoder,
             retrieval_index=self.assets.decision_state_retrieval_index,
-            case_vectors=self.assets.decision_state_case_vectors,
-            case_coords=self.assets.decision_state_case_coords,
+            encoder=self.assets.decision_state_encoder,
             config=self.assets.config,
             top_k=self.assets.top_k_retrieved_cases,
             same_prototype_only=False,
@@ -576,7 +577,9 @@ class NextPOIEndToEndPipeline:
                 continue
 
             try:
-                prefix_df, gold_next = self.build_test_query_from_full_session(session_df)
+                prefix_df, gold_next = self.build_test_query_from_full_session(
+                    session_df
+                )
                 prototype_signals = self.infer_prototype_signals(prefix_df)
                 current_state_df = self.build_current_state(
                     prefix_df, prototype_signals=prototype_signals
@@ -649,7 +652,9 @@ class NextPOIEndToEndPipeline:
                 selected = self.llm_parse_fn(llm_text, fallback_ids)
                 rec["selected_poi_id"] = selected
                 gold = rec.get("gold_next_poi_id", None)
-                rec["is_correct_at_1"] = (selected == gold) if gold is not None else None
+                rec["is_correct_at_1"] = (
+                    (selected == gold) if gold is not None else None
+                )
                 if include_details:
                     rec["llm_raw_text"] = llm_text
             except Exception as e:
@@ -674,7 +679,7 @@ class NextPOIEndToEndPipeline:
         show_progress: bool = True,
         prompt_workers: int = 0,
         retrieval_preselect_factor: int = 5,
-        use_torch_cuda: bool = False,
+        use_torch_cuda: bool = True,
     ) -> pd.DataFrame:
         """
         Batch retrieval + batch LLM decoding.
@@ -687,36 +692,16 @@ class NextPOIEndToEndPipeline:
 
         This usually preserves ranking quality while cutting CPU time sharply.
         """
-        try:
-            from tqdm import tqdm
-        except ImportError:
-            tqdm = None  # type: ignore[assignment]
-
-        def _haversine_one_to_many_m_from_radians(
-            lat1_r: float,
-            lon1_r: float,
-            lats2_r: np.ndarray,
-            lons2_r: np.ndarray,
-        ) -> np.ndarray:
-            # Earth radius in meters
-            R = 6_371_008.8
-            dlat = lats2_r - lat1_r
-            dlon = lons2_r - lon1_r
-            a = (
-                np.sin(dlat / 2.0) ** 2
-                + np.cos(lat1_r) * np.cos(lats2_r) * np.sin(dlon / 2.0) ** 2
-            )
-            c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
-            return R * c
 
         config = self.assets.config
         sid_col = config.session_id_col
         ts_col = config.timestamp_col
+        poi_id_col = config.poi_id_col
 
-        if sid_col not in test_checkins_df.columns:
-            raise ValueError(f"test_checkins_df must contain session column {sid_col!r}.")
-        if ts_col not in test_checkins_df.columns:
-            raise ValueError(f"test_checkins_df must contain timestamp column {ts_col!r}.")
+        required_cols = [sid_col, ts_col, poi_id_col]
+        for col in required_cols:
+            if col not in test_checkins_df.columns:
+                raise ValueError(f"test_checkins_df must contain column {col!r}.")
 
         idx = self.assets.decision_state_retrieval_index
         if idx is None:
@@ -731,7 +716,7 @@ class NextPOIEndToEndPipeline:
 
         work = test_checkins_df.copy()
         work[ts_col] = pd.to_datetime(work[ts_col], errors="coerce")
-        groups = work.sort_values([sid_col, ts_col]).groupby(sid_col, sort=False)
+        groups = work.sort_values([sid_col, ts_col, poi_id_col]).groupby(sid_col, sort=False)  # fmt: skip
 
         # ------------------------------------------------------------
         # 1) Build query states + query vectors
@@ -744,7 +729,7 @@ class NextPOIEndToEndPipeline:
         qi_counter = 0
 
         it = groups
-        if show_progress and tqdm is not None:
+        if show_progress:
             it = tqdm(groups, desc="build query states", unit="session")
 
         for session_id, session_df in it:
@@ -764,11 +749,9 @@ class NextPOIEndToEndPipeline:
                 continue
 
             try:
-                prefix_df, gold_next = self.build_test_query_from_full_session(session_df)
+                prefix_df, gold_next = self.build_test_query_from_full_session(session_df)  # fmt: skip
                 prototype_signals = self.infer_prototype_signals(prefix_df)
-                current_state_df = self.build_current_state(
-                    prefix_df, prototype_signals=prototype_signals
-                )
+                current_state_df = self.build_current_state(prefix_df, prototype_signals=prototype_signals)  # fmt: skip
                 q = current_state_df.iloc[0]
 
                 # Bucket id: prefer routed top1 when present, else proto_prototype_id
@@ -824,7 +807,10 @@ class NextPOIEndToEndPipeline:
 
         if not query_vecs:
             return pd.DataFrame(
-                [{k: v for k, v in r.items() if not k.startswith("_")} for r in session_meta]
+                [
+                    {k: v for k, v in r.items() if not k.startswith("_")}
+                    for r in session_meta
+                ]
             )
 
         Q = np.vstack(query_vecs).astype(np.float32, copy=False)  # (B, D)
@@ -832,9 +818,7 @@ class NextPOIEndToEndPipeline:
         # ------------------------------------------------------------
         # 2) Batched cosine retrieval per prototype bucket
         # ------------------------------------------------------------
-        retrieved_rows: list[np.ndarray] = [
-            np.array([], dtype=np.int64) for _ in range(len(query_vecs))
-        ]
+        retrieved_rows: list[np.ndarray] = [np.array([], dtype=np.int64) for _ in range(len(query_vecs))]  # fmt: skip
 
         # Optional GPU acceleration for cosine matmul (PyTorch)
         torch = None
@@ -949,12 +933,16 @@ class NextPOIEndToEndPipeline:
 
         # indices in session_meta that correspond to built queries
         query_meta_indices = [
-            i for i, r in enumerate(session_meta) if r.get("error") is None and not r.get("skipped")
+            i
+            for i, r in enumerate(session_meta)
+            if r.get("error") is None and not r.get("skipped")
         ]
 
         system_prompts: list[str] = ["" for _ in range(len(query_meta_indices))]
         user_prompts: list[str] = ["" for _ in range(len(query_meta_indices))]
-        fallback_ids_list: list[list[Any]] = [[] for _ in range(len(query_meta_indices))]
+        fallback_ids_list: list[list[Any]] = [
+            [] for _ in range(len(query_meta_indices))
+        ]
 
         if prompt_workers and prompt_workers > 0:
             with ThreadPoolExecutor(max_workers=int(prompt_workers)) as ex:
@@ -978,7 +966,11 @@ class NextPOIEndToEndPipeline:
         # ------------------------------------------------------------
         # 4) Batched LLM decoding + parse
         # ------------------------------------------------------------
-        llm_texts = llm_batch_generate_fn(system_prompts, user_prompts) if system_prompts else []
+        llm_texts = (
+            llm_batch_generate_fn(system_prompts, user_prompts)
+            if system_prompts
+            else []
+        )
         if len(llm_texts) != len(system_prompts):
             raise RuntimeError(
                 f"llm_batch_generate_fn returned {len(llm_texts)} outputs for {len(system_prompts)} prompts."
@@ -988,7 +980,9 @@ class NextPOIEndToEndPipeline:
         llm_i = 0
         for meta in session_meta:
             if meta.get("skipped") or meta.get("error") is not None:
-                out_rows.append({k: v for k, v in meta.items() if not k.startswith("_")})
+                out_rows.append(
+                    {k: v for k, v in meta.items() if not k.startswith("_")}
+                )
                 continue
 
             llm_text = llm_texts[llm_i]
@@ -999,7 +993,9 @@ class NextPOIEndToEndPipeline:
                 selected = self.llm_parse_fn(llm_text, fallback_ids)
                 meta["selected_poi_id"] = selected
                 gold = meta.get("gold_next_poi_id", None)
-                meta["is_correct_at_1"] = (selected == gold) if gold is not None else None
+                meta["is_correct_at_1"] = (
+                    (selected == gold) if gold is not None else None
+                )
                 if include_details:
                     meta["llm_raw_text"] = llm_text
             except Exception as e:

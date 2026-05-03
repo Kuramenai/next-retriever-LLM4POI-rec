@@ -29,6 +29,8 @@ def get_time_of_day_bin(ts: pd.Timestamp) -> Tuple[int, str]:
 
 def extract_temporal_features(
     session_df: pd.DataFrame,
+    checkin_time_col: str = "CheckinTime",
+    poi_id_col: str = "PoiId",
     duration_mean: float | None = None,
     duration_std: float | None = None,
 ) -> Dict[str, object]:
@@ -52,16 +54,22 @@ def extract_temporal_features(
     if session_df.empty:
         raise ValueError("session_df cannot be empty")
 
-    s = session_df.copy()
-    s["Time"] = pd.to_datetime(s["Time"])
-    s = s.sort_values(["Time", "PId"]).reset_index(drop=True)
+    required_cols = [checkin_time_col, poi_id_col]
+    missing_cols = [col for col in required_cols if col not in session_df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
 
-    start_time = s.iloc[0]["Time"]
-    end_time = s.iloc[-1]["Time"]
+    s = session_df.copy()
+    s = s.sort_values([checkin_time_col, poi_id_col]).reset_index(drop=True)
+
+    start_time = s.iloc[0][checkin_time_col]
+    end_time = s.iloc[-1][checkin_time_col]
 
     # ----- 1) Time-of-day proportions from all check-ins -----
     bin_indices = (
-        s["Time"].apply(lambda ts: get_time_of_day_bin(pd.Timestamp(ts))[0]).to_numpy()
+        s[checkin_time_col]
+        .apply(lambda ts: get_time_of_day_bin(pd.Timestamp(ts))[0])
+        .to_numpy()
     )
     tod_counts = np.bincount(bin_indices, minlength=4).astype(np.float32)
     tod_props = tod_counts / max(tod_counts.sum(), 1.0)
@@ -99,18 +107,30 @@ def extract_temporal_features(
 
 def fit_duration_normalizer_from_checkins(
     session_checkins_df: pd.DataFrame,
+    session_id_col: str = "SessionId",
+    checkin_time_col: str = "CheckinTime",
+    poi_id_col: str = "PoiId",
 ) -> Tuple[float, float]:
     """
     Fit duration normalization on TRAIN sessions only.
-    Expects columns: SessionId, Time
+    Expects columns: session_id_col, checkin_time_col, poi_id_col
     """
-    df = session_checkins_df.copy()
-    df["Time"] = pd.to_datetime(df["Time"])
-    df = df.sort_values(["SessionId", "Time", "PId"]).reset_index(drop=True)
+    required_cols = [session_id_col, checkin_time_col, poi_id_col]
+    missing_cols = [
+        col for col in required_cols if col not in session_checkins_df.columns
+    ]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
 
-    bounds = df.groupby("SessionId", as_index=False).agg(
-        session_start_time=("Time", "min"),
-        session_end_time=("Time", "max"),
+    df = session_checkins_df.copy()
+    df[checkin_time_col] = pd.to_datetime(df[checkin_time_col], errors="coerce")
+    df = df.sort_values([session_id_col, checkin_time_col, poi_id_col]).reset_index(
+        drop=True
+    )
+
+    bounds = df.groupby(session_id_col, as_index=False).agg(
+        session_start_time=(checkin_time_col, "min"),
+        session_end_time=(checkin_time_col, "max"),
     )
 
     duration_minutes = (
@@ -124,24 +144,36 @@ def fit_duration_normalizer_from_checkins(
 
 def build_temporal_feature_matrix(
     session_checkins_df: pd.DataFrame,
+    session_id_col: str = "SessionId",
+    checkin_time_col: str = "CheckinTime",
+    poi_id_col: str = "PoiId",
     duration_mean: float | None = None,
     duration_std: float | None = None,
 ) -> Tuple[np.ndarray, pd.DataFrame]:
     """
     Batch extraction from session-level check-in traces.
-    Expects columns: SessionId, Time, PId
+    Expects columns: session_id_col, checkin_time_col, poi_id_col
     """
+    required_cols = [session_id_col, checkin_time_col, poi_id_col]
+    missing_cols = [
+        col for col in required_cols if col not in session_checkins_df.columns
+    ]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
 
     df = session_checkins_df.copy()
-    df["Time"] = pd.to_datetime(df["UTCTimeOffset"])
-    df = df.sort_values(["SessionId", "Time", "PId"]).reset_index(drop=True)
+    df = df.sort_values([session_id_col, checkin_time_col, poi_id_col]).reset_index(
+        drop=True
+    )
 
     vectors = []
     rows = []
 
-    for session_id, group in df.groupby("SessionId", sort=False):
+    for session_id, group in df.groupby(session_id_col, sort=False):
         feat = extract_temporal_features(
-            group,
+            session_df=group,
+            checkin_time_col=checkin_time_col,
+            poi_id_col=poi_id_col,
             duration_mean=duration_mean,
             duration_std=duration_std,
         )

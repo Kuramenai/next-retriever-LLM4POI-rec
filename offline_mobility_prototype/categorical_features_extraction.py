@@ -19,41 +19,49 @@ Usage
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 import pandas as pd
-import numpy as np
+
 
 # Import taxonomy mappings
 from poi_taxonomy import (
     RAW_TO_MID,
     RAW_TO_SEGMENTATION,
-    MID_TO_SEGMENTATION,
     NEUTRAL_LABEL,
     TRANSIT_LABEL,
     TRANSIT_UNRESOLVED_LABEL,
 )
 
+pd.set_option("future.no_silent_downcasting", True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Token formatting
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def _format_token(s: str) -> str:
     """Lowercase, strip, collapse whitespace to underscores."""
     return s.strip().lower().replace(" ", "_").replace("&", "and")
 
 
+def category_sequence_to_document(category_sequence: list[str]) -> str:
+    """Convert ordered category tokens into a whitespace-delimited document for TF-IDF."""
+    return " ".join(str(t) for t in category_sequence)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Core: resolve absorbable categories at any taxonomy level
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def _resolve_absorbable_at_level(
     df: pd.DataFrame,
-    output_col: str,
-    session_id_col: str,
-    timestamp_col: str,
-    seg_col: str,
     *,
+    output_col: str = "_output_token",
+    session_id_col: str = "SessionId",
+    checkin_time_col: str = "CheckinTime",
+    poi_id_col: str = "PoiId",
+    poi_category_name_col: str = "PoiCategoryName",
     absorb_transit: bool = True,
     absorb_neutral: bool = True,
     mode: str = "retrospective",
@@ -86,40 +94,36 @@ def _resolve_absorbable_at_level(
     """
     resolved = df[output_col].copy()
     original = df[output_col].copy()  # preserve originals for unresolvable fallback
-    seg = df[seg_col]
-    groups = df[session_id_col]
+    seg = df[poi_category_name_col].map(RAW_TO_SEGMENTATION).fillna("unknown")
+    # Series.groupby(name) uses index levels / grouper objects, not df columns.
+    session_keys = df[session_id_col]
 
     # ── Transit: back-fill from destination ──────────────────────────
     if absorb_transit:
         transit_mask = seg == TRANSIT_LABEL
-
         if transit_mask.any():
             # Mask transit positions as NaN, then bfill within session
             transit_resolved = resolved.where(~transit_mask)
             transit_resolved = transit_resolved.groupby(
-                groups, sort=False
+                session_keys, sort=False
             ).transform(lambda s: s.bfill())
 
-            # Handle trailing transit (no destination to bfill from)
             trailing_nan = transit_mask & transit_resolved.isna()
-
             if trailing_nan.any():
                 if mode == "retrospective":
-                    # Fall back to forward-fill from preceding activity
-                    ffill_fallback = resolved.where(~transit_mask).groupby(
-                        groups, sort=False
-                    ).transform(lambda s: s.ffill())
-                    transit_resolved.loc[trailing_nan] = ffill_fallback.loc[trailing_nan]
+                    ffill_fallback = (
+                        resolved.where(~transit_mask)
+                        .groupby(session_keys, sort=False)
+                        .transform(lambda s: s.ffill())
+                    )
+                    transit_resolved.loc[trailing_nan] = ffill_fallback.loc[
+                        trailing_nan
+                    ]
                 else:
-                    # Online: mark as unresolved
                     transit_resolved.loc[trailing_nan] = _format_token(
                         TRANSIT_UNRESOLVED_LABEL
                     )
 
-            # All-transit sessions: bfill and ffill both fail.
-            # Keep the original raw token (e.g. "subway", "train_station")
-            # instead of injecting a generic "transit" label that would
-            # pollute the TF-IDF vocabulary.
             still_nan = transit_mask & transit_resolved.isna()
             if still_nan.any():
                 transit_resolved.loc[still_nan] = original.loc[still_nan]
@@ -133,10 +137,9 @@ def _resolve_absorbable_at_level(
         if neutral_mask.any():
             neutral_resolved = resolved.where(~neutral_mask)
             neutral_resolved = neutral_resolved.groupby(
-                groups, sort=False
-            ).transform(lambda s: s.ffill().bfill())
+                session_keys, sort=False
+            ).transform(lambda s: s.ffill())
 
-            # All-neutral sessions: keep original tokens
             still_nan = neutral_mask & neutral_resolved.isna()
             if still_nan.any():
                 neutral_resolved.loc[still_nan] = original.loc[still_nan]
@@ -150,10 +153,14 @@ def _resolve_absorbable_at_level(
 # Public API
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def extract_category_sequence(
     session_df: pd.DataFrame,
-    category_col: str = "Category",
-) -> list[str]:
+    *,
+    poi_category_name_col: str = "PoiCategoryName",
+    checkin_time_col: str = "CheckinTime",
+    poi_id_col: str = "PoiId",
+) -> pd.Series:
     """
     Return the ordered category sequence for one session.
 
@@ -163,25 +170,15 @@ def extract_category_sequence(
         raise ValueError("session_df cannot be empty")
 
     s = session_df.copy()
-    s["Time"] = pd.to_datetime(s["Time"])
-    s = s.sort_values(["Time", "PId"]).reset_index(drop=True)
+    s = s.sort_values([checkin_time_col, poi_id_col]).reset_index(drop=True)
 
-    categories = (
-        s[category_col]
+    return pd.Series(
+        s[poi_category_name_col]
         .astype(str)
         .str.strip()
         .str.lower()
         .str.replace(r"\s+", "_", regex=True)
-        .tolist()
     )
-    return categories
-
-
-def category_sequence_to_document(category_sequence: list[str]) -> str:
-    """
-    Convert ordered categories into a whitespace-delimited document.
-    """
-    return " ".join(category_sequence)
 
 
 def build_category_documents(
@@ -192,8 +189,9 @@ def build_category_documents(
     absorb_neutral: bool = False,
     mode: str = "retrospective",
     session_id_col: str = "SessionId",
-    timestamp_col: str = "Time",
-    category_col: str = "Category",
+    checkin_time_col: str = "CheckinTime",
+    poi_id_col: str = "PoiId",
+    poi_category_name_col: str = "PoiCategoryName",
     warn_unmapped: bool = True,
 ) -> pd.DataFrame:
     """
@@ -205,7 +203,7 @@ def build_category_documents(
         Check-in level data. Required columns: session_id_col, timestamp_col,
         category_col, 'PId'.
     taxonomy_level : str
-        "raw" (207 categories), "mid" (17 categories), or "seg" (8 categories).
+        "raw", "mid", or "seg".
     absorb_transit : bool
         If True, transit check-ins inherit the destination's category label
         via back-fill within each session.
@@ -228,13 +226,26 @@ def build_category_documents(
         - absorbed_transit        (bool)
         - absorbed_neutral        (bool)
     """
+    required_cols = [
+        session_id_col,
+        checkin_time_col,
+        poi_id_col,
+        poi_category_name_col,
+    ]
+    missing_cols = [
+        col for col in required_cols if col not in session_checkins_df.columns
+    ]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+
     df = session_checkins_df.copy()
-    df[timestamp_col] = pd.to_datetime(df[timestamp_col])
-    df = df.sort_values([session_id_col, timestamp_col, "PId"]).reset_index(drop=True)
+    df = df.sort_values([session_id_col, checkin_time_col, poi_id_col]).reset_index(
+        drop=True
+    )
 
     # ── Always keep the raw sequence for reference / debugging ──────
     df["_raw_token"] = (
-        df[category_col]
+        df[poi_category_name_col]
         .astype(str)
         .str.strip()
         .str.lower()
@@ -246,14 +257,14 @@ def build_category_documents(
         df["_output_token"] = df["_raw_token"]
     elif taxonomy_level == "mid":
         df["_output_token"] = (
-            df[category_col]
+            df[poi_category_name_col]
             .map(RAW_TO_MID)
             .fillna("unknown")
             .apply(_format_token)
         )
     elif taxonomy_level == "seg":
         df["_output_token"] = (
-            df[category_col]
+            df[poi_category_name_col]
             .map(RAW_TO_SEGMENTATION)
             .fillna("unknown")
             .apply(_format_token)
@@ -266,26 +277,29 @@ def build_category_documents(
     # ── Warn about unmapped categories ──────────────────────────────
     if warn_unmapped and taxonomy_level != "raw":
         mapping = RAW_TO_MID if taxonomy_level == "mid" else RAW_TO_SEGMENTATION
-        unmapped_mask = ~df[category_col].isin(mapping)
+        unmapped_mask = ~df[poi_category_name_col].isin(mapping)
         if unmapped_mask.any():
-            unmapped_cats = df.loc[unmapped_mask, category_col].unique()
+            unmapped_cats = df.loc[unmapped_mask, poi_category_name_col].unique()
             print(
                 f"[build_category_documents] WARNING: {len(unmapped_cats)} unmapped "
                 f"categories ({int(unmapped_mask.sum())} rows):\n  "
-                + "\n  ".join(sorted(unmapped_cats)[:20])
+                + "\n  ".join(sorted(unmapped_cats))
             )
 
     # ── Apply absorption if requested ───────────────────────────────
     if absorb_transit or absorb_neutral:
         # Need seg-level labels to identify which rows are transit/neutral
-        df["_seg_label"] = df[category_col].map(RAW_TO_SEGMENTATION).fillna("unknown")
+        df["_seg_label"] = (
+            df[poi_category_name_col].map(RAW_TO_SEGMENTATION).fillna("unknown")
+        )
 
         df["_output_token"] = _resolve_absorbable_at_level(
             df,
             output_col="_output_token",
             session_id_col=session_id_col,
-            timestamp_col=timestamp_col,
-            seg_col="_seg_label",
+            checkin_time_col=checkin_time_col,
+            poi_id_col=poi_id_col,
+            poi_category_name_col=poi_category_name_col,
             absorb_transit=absorb_transit,
             absorb_neutral=absorb_neutral,
             mode=mode,
@@ -294,21 +308,23 @@ def build_category_documents(
     # ── Build per-session documents ─────────────────────────────────
     rows = []
     for session_id, group in df.groupby(session_id_col, sort=False):
-        group = group.sort_values([timestamp_col, "PId"]).reset_index(drop=True)
+        group = group.sort_values([checkin_time_col, poi_id_col]).reset_index(drop=True)
 
         raw_seq = group["_raw_token"].tolist()
         output_seq = group["_output_token"].tolist()
         doc = category_sequence_to_document(output_seq)
 
-        rows.append({
-            session_id_col: session_id,
-            "category_sequence": output_seq,
-            "category_sequence_raw": raw_seq,
-            "category_doc": doc,
-            "taxonomy_level": taxonomy_level,
-            "absorbed_transit": absorb_transit,
-            "absorbed_neutral": absorb_neutral,
-        })
+        rows.append(
+            {
+                session_id_col: session_id,
+                "category_sequence": output_seq,
+                "category_sequence_raw": raw_seq,
+                "category_doc": doc,
+                "taxonomy_level": taxonomy_level,
+                "absorbed_transit": absorb_transit,
+                "absorbed_neutral": absorb_neutral,
+            }
+        )
 
     return pd.DataFrame(rows)
 
@@ -317,23 +333,43 @@ def build_category_documents(
 # Quick diagnostic
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def compare_absorption_effect(
     session_checkins_df: pd.DataFrame,
     n_examples: int = 5,
     taxonomy_level: str = "mid",
     session_id_col: str = "SessionId",
-    timestamp_col: str = "Time",
+    checkin_time_col: str = "CheckinTime",
+    poi_id_col: str = "PoiId",
+    poi_category_name_col: str = "PoiCategoryName",
 ) -> None:
     """
     Print side-by-side comparison of raw vs absorbed category sequences
     for a few example sessions. Useful for sanity-checking.
     """
+
+    required_cols = [
+        session_id_col,
+        checkin_time_col,
+        poi_id_col,
+        poi_category_name_col,
+    ]
+    missing_cols = [
+        col for col in required_cols if col not in session_checkins_df.columns
+    ]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+
     raw_docs = build_category_documents(
         session_checkins_df,
         taxonomy_level=taxonomy_level,
         absorb_transit=False,
         absorb_neutral=False,
         warn_unmapped=False,
+        session_id_col=session_id_col,
+        checkin_time_col=checkin_time_col,
+        poi_id_col=poi_id_col,
+        poi_category_name_col=poi_category_name_col,
     )
     absorbed_docs = build_category_documents(
         session_checkins_df,
@@ -342,21 +378,25 @@ def compare_absorption_effect(
         absorb_neutral=True,
         mode="retrospective",
         warn_unmapped=False,
+        session_id_col=session_id_col,
+        checkin_time_col=checkin_time_col,
+        poi_id_col=poi_id_col,
+        poi_category_name_col=poi_category_name_col,
     )
 
-    merged = raw_docs[[session_id_col, "category_sequence"]].rename(
-        columns={"category_sequence": "before"}
-    ).merge(
-        absorbed_docs[[session_id_col, "category_sequence"]].rename(
-            columns={"category_sequence": "after"}
-        ),
-        on=session_id_col,
+    merged = (
+        raw_docs[[session_id_col, "category_sequence"]]
+        .rename(columns={"category_sequence": "before"})
+        .merge(
+            absorbed_docs[[session_id_col, "category_sequence"]].rename(
+                columns={"category_sequence": "after"}
+            ),
+            on=session_id_col,
+        )
     )
 
     # Find sessions where absorption changed something
-    merged["changed"] = merged.apply(
-        lambda r: r["before"] != r["after"], axis=1
-    )
+    merged["changed"] = merged.apply(lambda r: r["before"] != r["after"], axis=1)
 
     changed = merged[merged["changed"]]
     if changed.empty:
@@ -367,8 +407,10 @@ def compare_absorption_effect(
 
     print(f"\n{'═' * 80}")
     print(f"  ABSORPTION COMPARISON ({taxonomy_level} level)")
-    print(f"  {len(changed)}/{len(merged)} sessions changed "
-          f"({100*len(changed)/len(merged):.1f}%)")
+    print(
+        f"  {len(changed)}/{len(merged)} sessions changed "
+        f"({100 * len(changed) / len(merged):.1f}%)"
+    )
     print(f"{'═' * 80}")
 
     for _, row in sample.iterrows():

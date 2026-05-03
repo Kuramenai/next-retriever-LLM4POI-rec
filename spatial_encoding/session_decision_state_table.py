@@ -22,11 +22,10 @@ from typing import Optional, Union
 
 import pickle
 from pathlib import Path
-import sys
-import os
 import numpy as np
 import pandas as pd
 from termcolor import cprint
+from tqdm import tqdm
 
 from spatial_encoding.pair_transition_features_extraction import (
     compute_single_session_transitions,
@@ -64,7 +63,7 @@ def _extract_recent_transitions(
     Extract prev1_, prev2_, ... features for the decision point at
     current_checkin_pos. Returns both binned and raw continuous values.
 
-    The transition *into* checkin at position p has transition_index = p - 1.
+    The transition into checkin at position p has transition_index = p - 1.
     So prev1 (most recent incoming) is at transition_index = current_checkin_pos - 1.
     """
     rec = {}
@@ -100,9 +99,7 @@ def _resolve_gap_col(columns) -> str:
         return "gap_bin"
     if "temporal_gap_bin" in columns:
         return "temporal_gap_bin"
-    raise ValueError(
-        "Transition data must contain either 'gap_bin' or 'temporal_gap_bin'."
-    )
+    raise ValueError("Transition data must contain either 'gap_bin' or 'temporal_gap_bin'.")
 
 
 # ---------------------------------------------------------------------------
@@ -141,33 +138,29 @@ def build_decision_state_table(
     if config.poi_id_col not in poi_descriptor_df.columns:
         raise ValueError(f"poi_descriptor_df must contain {config.poi_id_col!r}")
 
-    if config.session_id_col not in session_transitions_df.columns:
-        raise ValueError(
-            f"session_transitions_df must contain {config.session_id_col!r}"
-        )
-
-    if "transition_index" not in session_transitions_df.columns:
-        raise ValueError("session_transitions_df must contain 'transition_index'")
+    required_transition_cols = [config.session_id_col, "transition_index"]
+    missing_transition = [c for c in required_transition_cols if c not in session_transitions_df.columns]
+    if missing_transition:
+        raise ValueError(f"Missing required columns in session_transitions_df: {missing_transition}")
 
     gap_col = _resolve_gap_col(session_transitions_df.columns)
 
-    for col in ["distance_bin", "direction_bin"]:
-        if col not in session_transitions_df.columns:
-            raise ValueError(f"session_transitions_df must contain {col!r}")
+    required_transition_cols = ["distance_bin", "direction_bin"]
+    missing_transition_cols = [c for c in required_transition_cols if c not in session_transitions_df.columns]
+    if missing_transition_cols:
+        raise ValueError(f"Missing required columns in session_transitions_df: {missing_transition_cols}")
 
     # ------------------------------------------------------------------
     # Normalize and sort check-ins
     # ------------------------------------------------------------------
     df = checkins_df.copy()
     if not pd.api.types.is_datetime64_any_dtype(df[config.timestamp_col]):
-        df[config.timestamp_col] = pd.to_datetime(
-            df[config.timestamp_col], errors="coerce"
-        )
+        df[config.timestamp_col] = pd.to_datetime(df[config.timestamp_col], errors="coerce")
     if df[config.timestamp_col].isna().any():
         bad_count = int(df[config.timestamp_col].isna().sum())
         raise ValueError(f"{bad_count} rows have invalid timestamps after parsing.")
 
-    sort_cols = [config.session_id_col, config.timestamp_col]
+    sort_cols = [config.session_id_col, config.timestamp_col, config.poi_id_col]
     df = df.sort_values(sort_cols).reset_index(drop=True)
 
     # ------------------------------------------------------------------
@@ -183,14 +176,8 @@ def build_decision_state_table(
     proto_map = None
     proto_cols = []
     if session_prototype_df is not None:
-        if config.session_id_col not in session_prototype_df.columns:
-            raise ValueError(
-                f"session_prototype_df must contain {config.session_id_col!r}"
-            )
         proto_df = (
-            session_prototype_df.drop_duplicates(
-                subset=[config.session_id_col], keep="first"
-            )
+            session_prototype_df.drop_duplicates(subset=[config.session_id_col], keep="first")
             .set_index(config.session_id_col)
             .copy()
         )
@@ -200,9 +187,7 @@ def build_decision_state_table(
     # Index transitions by (session_id → transition_index)
     transition_groups = {
         sid: sdf.set_index("transition_index", drop=False).copy()
-        for sid, sdf in session_transitions_df.groupby(
-            config.session_id_col, sort=False
-        )
+        for sid, sdf in session_transitions_df.groupby(config.session_id_col, sort=False)
     }
 
     # ------------------------------------------------------------------
@@ -212,9 +197,14 @@ def build_decision_state_table(
     has_user = hasattr(config, "user_id_col") and config.user_id_col in df.columns
     has_category = hasattr(config, "category_col") and config.category_col in df.columns
 
-    for session_id, sdf in df.groupby(config.session_id_col, sort=False):
-        sdf = sdf.sort_values(config.timestamp_col).reset_index(drop=True)
+    sort_cols = [config.session_id_col, config.timestamp_col, config.poi_id_col]
+    df = df.sort_values(sort_cols).reset_index(drop=True)
+    sessions_groups = df.groupby(config.session_id_col, sort=False)
+    it = tqdm(sessions_groups, desc="Building decision states", unit="session")
+    for session_id, sdf in it:
+        sdf = sdf.sort_values(config.timestamp_col, config.poi_id_col).reset_index(drop=True)
         if len(sdf) < 2:
+            cprint(f"Session {session_id} has less than 2 check-ins; skipping...", "yellow")
             continue
 
         trans_sdf = transition_groups.get(session_id, None)
@@ -233,9 +223,7 @@ def build_decision_state_table(
             next_ts = next_row[config.timestamp_col]
 
             if curr_poi not in poi_desc.index:
-                raise KeyError(
-                    f"Current POI {curr_poi!r} missing from poi_descriptor_df"
-                )
+                raise KeyError(f"Current POI {curr_poi!r} missing from poi_descriptor_df")
 
             seen_pois.add(curr_poi)
             if has_category and pd.notna(curr_row[config.category_col]):
@@ -250,9 +238,7 @@ def build_decision_state_table(
                 "current_timestamp": curr_ts,
                 "next_timestamp": next_ts,
                 "current_time_bin": _decision_time_bin(curr_ts),
-                "prefix_elapsed_min": (
-                    (curr_ts - session_start_ts).total_seconds() / 60.0
-                ),
+                "prefix_elapsed_min": ((curr_ts - session_start_ts).total_seconds() / 60.0),
                 "prefix_unique_poi_count": len(seen_pois),
                 "prefix_repeat_ratio": 1.0 - (len(seen_pois) / float(i + 1)),
             }
@@ -299,9 +285,7 @@ def build_decision_state_table(
         sort_cols = [config.session_id_col, "decision_index"]
         if has_user and config.user_id_col in decision_state_df.columns:
             sort_cols = [config.user_id_col, *sort_cols]
-        decision_state_df = decision_state_df.sort_values(sort_cols).reset_index(
-            drop=True
-        )
+        decision_state_df = decision_state_df.sort_values(sort_cols).reset_index(drop=True)
 
     return decision_state_df
 
@@ -324,9 +308,7 @@ def _normalize_proto_signals(
         if len(prototype_signals) != 1:
             raise ValueError("prototype_signals DataFrame must have exactly one row.")
         return prototype_signals.iloc[0].to_dict()
-    raise TypeError(
-        "prototype_signals must be None, dict, pandas Series, or single-row DataFrame."
-    )
+    raise TypeError("prototype_signals must be None, dict, pandas Series, or single-row DataFrame.")
 
 
 # ---------------------------------------------------------------------------
@@ -365,30 +347,28 @@ def build_current_decision_state(
         raise ValueError(f"poi_descriptor_df must contain {config.poi_id_col!r}")
 
     if len(partial_session_df) == 0:
-        raise ValueError(
-            "partial_session_df must contain at least one observed check-in."
-        )
+        raise ValueError("partial_session_df must contain at least one observed check-in.")  # fmt: skip
 
     if _pair_lookup is None:
         if pair_lookup_df is None:
             raise ValueError("Provide either _pair_lookup or pair_lookup_df.")
+        cprint("[DEBUG] _pair_lookup is None, building it...", "red")
         _pair_lookup = build_pair_lookup_dict(pair_lookup_df)
 
     if _poi_coord_map is None:
         if poi_df is None:
             raise ValueError("Provide either _poi_coord_map or poi_df.")
+        cprint("[DEBUG] _poi_coord_map is None, building it...", "red")
         _poi_coord_map = build_poi_coord_map(poi_df, config)
 
     df = partial_session_df.copy()
     if not pd.api.types.is_datetime64_any_dtype(df[config.timestamp_col]):
-        df[config.timestamp_col] = pd.to_datetime(
-            df[config.timestamp_col], errors="coerce"
-        )
+        df[config.timestamp_col] = pd.to_datetime(df[config.timestamp_col], errors="coerce")  # fmt: skip
     if df[config.timestamp_col].isna().any():
         bad_count = int(df[config.timestamp_col].isna().sum())
         raise ValueError(f"{bad_count} rows have invalid timestamps after parsing.")
 
-    df = df.sort_values(config.timestamp_col).reset_index(drop=True)
+    df = df.sort_values([config.timestamp_col, config.poi_id_col]).reset_index(drop=True)  # fmt: skip
 
     has_user = hasattr(config, "user_id_col") and config.user_id_col in df.columns
     has_category = hasattr(config, "category_col") and config.category_col in df.columns
@@ -407,6 +387,7 @@ def build_current_decision_state(
     curr_ts = curr_row[config.timestamp_col]
     session_id = curr_row[config.session_id_col]
 
+    # Wouldn't it be better if we use a dictionary to store the POI descriptors?
     poi_desc = (
         poi_descriptor_df.drop_duplicates(subset=[config.poi_id_col], keep="first")
         .set_index(config.poi_id_col)
@@ -425,9 +406,7 @@ def build_current_decision_state(
         "current_POIId": curr_poi,
         "current_timestamp": curr_ts,
         "current_time_bin": _decision_time_bin(curr_ts),
-        "prefix_elapsed_min": (
-            (curr_ts - df.iloc[0][config.timestamp_col]).total_seconds() / 60.0
-        ),
+        "prefix_elapsed_min": ((curr_ts - df.iloc[0][config.timestamp_col]).total_seconds() / 60.0),
         "prefix_unique_poi_count": int(df[config.poi_id_col].nunique()),
         "prefix_repeat_ratio": 1.0 - (df[config.poi_id_col].nunique() / float(len(df))),
     }
@@ -437,9 +416,7 @@ def build_current_decision_state(
 
     if has_category:
         rec["current_category"] = curr_row[config.category_col]
-        rec["prefix_unique_category_count"] = int(
-            df[config.category_col].nunique(dropna=True)
-        )
+        rec["prefix_unique_category_count"] = int(df[config.category_col].nunique(dropna=True))  # fmt: skip
 
     # Current POI descriptors
     for col in curr_desc.index:
@@ -472,76 +449,50 @@ def build_current_decision_state(
 
 if __name__ == "__main__":
     config = SpatialEncodingConfig()
-    city = "tky"
+    city = "nyc"
     scrip_dir = Path(__file__).resolve().parent.parent
 
     cprint(f"\nLoading {city} train checkins dataframe...", "yellow")
     train_checkins_df = pd.read_csv(scrip_dir / f"data/{city}/train_sample.csv")
+    train_checkins_df_session_id_col_mapping = {
+        config.session_id_col: "SessionId",
+    }
+    train_checkins_df = train_checkins_df.rename(columns=train_checkins_df_session_id_col_mapping)
 
     cprint(f"\nLoading {city} poi descriptor dataframe...", "yellow")
-    poi_descriptor_df = pd.read_csv(
-        scrip_dir / f"artifacts/{city}/{city}_poi_descriptor.csv"
-    )
+    poi_descriptor_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi_descriptor.csv")
 
     cprint(f"\nLoading {city} sessions transitions dataframe...", "yellow")
-    session_transition_df = pd.read_csv(
-        scrip_dir / f"artifacts/{city}/{city}_session_transition.csv"
-    )
+    session_transition_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_session_transition.csv")
 
-    # Optional: attach Module-1 prototype assignments if the GMM artifact exists.
-    # This keeps behavior backward-compatible when the artifact is absent.
     session_prototype_df = None
     gmm_path = scrip_dir / f"artifacts/{city}/{city}_gmm_cluster.pkl"
     if gmm_path.exists():
-        cprint(
-            f"\nFound Module-1 artifact at {gmm_path}; loading prototype assignments...",
-            "yellow",
-        )
+        cprint(f"\nFound Module-1 artifact at {gmm_path}; loading prototype assignments...", "yellow")  # fmt: skip
         with gmm_path.open("rb") as f:
             gmm_payload = pickle.load(f)
 
         train_payload = gmm_payload.get("train", {})
-        maybe_assignments = train_payload.get("assignments", None)
-        if isinstance(maybe_assignments, pd.DataFrame) and len(maybe_assignments) > 0:
-            session_prototype_df = maybe_assignments.copy()
-            if (
-                config.session_id_col not in session_prototype_df.columns
-                and "SessionId" in session_prototype_df.columns
-            ):
-                session_prototype_df = session_prototype_df.rename(
-                    columns={"SessionId": config.session_id_col}
-                )
+        train_assignments = train_payload.get("assignments", None)
 
-            if config.session_id_col not in session_prototype_df.columns:
-                cprint(
-                    "Prototype assignments loaded but session id column is incompatible; "
-                    "continuing without prototype signals.",
-                    "yellow",
-                )
-                session_prototype_df = None
-            else:
-                cprint(
-                    "Prototype assignments will be merged into decision states.",
-                    "green",
-                )
+        if isinstance(train_assignments, pd.DataFrame) and len(train_assignments) > 0:
+            required_cols = [config.session_id_col, "prototype_id"]
+            missing_cols = [c for c in required_cols if c not in train_assignments.columns]
+            if missing_cols:
+                raise ValueError(f"Missing required columns in train_assignments: {missing_cols}")
+            session_prototype_df = train_assignments.copy()
+            session_prototype_df = session_prototype_df.rename(columns={"SessionId": config.session_id_col})
         else:
-            cprint(
-                "GMM artifact found but no train assignments table is available; "
-                "continuing without prototype signals.",
-                "yellow",
-            )
+            cprint("GMM artifact found but no train assignments table is available", "red")
+
     else:
-        cprint(
-            f"\nNo Module-1 artifact found at {gmm_path}; "
-            "building decision states without prototype signals.",
-            "yellow",
-        )
+        cprint(f"GMM artifact not found at {gmm_path}", "red")
 
     decision_state_df = build_decision_state_table(
-        train_checkins_df,
-        poi_descriptor_df,
-        session_transition_df,
-        config,
+        checkins_df=train_checkins_df,
+        poi_descriptor_df=poi_descriptor_df,
+        session_transition_df=session_transition_df,
+        config=config,
         session_prototype_df=session_prototype_df,
     )
 
