@@ -13,18 +13,19 @@ from __future__ import annotations
 
 from typing import Any
 
+import pickle
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from pathlib import Path
 from termcolor import cprint
 
-from spatial_encoding.sparse_pair_transition_lookup import (
+from sparse_pair_transition_lookup import (
     _bin_distances_m,
     _bearing_deg_to_direction_bin,
 )
 
-from spatial_encoding.extract_poi_spatial_descriptors import SpatialEncodingConfig
+from extract_poi_spatial_descriptors import SpatialEncodingConfig
 
 
 # ---------------------------------------------------------------------------
@@ -144,8 +145,8 @@ def build_poi_coord_map(
 
 def compute_single_session_transitions(
     session_df: pd.DataFrame,
-    pair_lookup: dict[tuple, dict],
-    poi_coord_map: dict,
+    lookup_df: pd.DataFrame,
+    coord_df: pd.DataFrame,
     config,
     *,
     session_id: Any = None,
@@ -200,13 +201,14 @@ def compute_single_session_transitions(
 
     # ---- Lookup alignment (vectorized) ----
     pair_idx = pd.MultiIndex.from_arrays([src_poi, dst_poi], names=["src_POIId", "dst_POIId"])  # fmt: skip
-    if len(pair_lookup) > 0:
-        lookup_df = pd.DataFrame.from_dict(pair_lookup, orient="index")
-        # keys are (src, dst) tuples → convert to MultiIndex for fast reindex
-        lookup_df.index = pd.MultiIndex.from_tuples(lookup_df.index, names=["src_POIId", "dst_POIId"])  # fmt: skip
-        aligned = lookup_df.reindex(pair_idx)
-    else:
-        aligned = pd.DataFrame(index=pair_idx)
+    # if len(pair_lookup) > 0:
+    #     lookup_df = pd.DataFrame.from_dict(pair_lookup, orient="index")
+    #     # keys are (src, dst) tuples → convert to MultiIndex for fast reindex
+    #     lookup_df.index = pd.MultiIndex.from_tuples(lookup_df.index, names=["src_POIId", "dst_POIId"])  # fmt: skip
+    #     aligned = lookup_df.reindex(pair_idx)
+    # else:
+    #     aligned = pd.DataFrame(index=pair_idx)
+    aligned = lookup_df.reindex(pair_idx)
 
     final_distance_m = aligned.get("final_distance_m", pd.Series(index=pair_idx, dtype=float)).to_numpy()  # fmt: skip
     bearing_deg = aligned.get("bearing_deg", pd.Series(index=pair_idx, dtype=float)).to_numpy()  # fmt: skip
@@ -221,12 +223,11 @@ def compute_single_session_transitions(
     needs_any = needs_distance | needs_bearing | needs_dist_bin | needs_dir_bin
 
     if np.any(needs_any):
-        coord_df = pd.DataFrame.from_dict(poi_coord_map, orient="index")
         src_coords = coord_df.reindex(src_poi)
         dst_coords = coord_df.reindex(dst_poi)
-        if src_coords[[config.lat_col, config.lon_col]].isna().any(axis=None) or dst_coords[
-            [config.lat_col, config.lon_col]
-        ].isna().any(axis=None):
+        if src_coords[[config.lat_col, config.lon_col]].isna().any(
+            axis=None
+        ) or dst_coords[[config.lat_col, config.lon_col]].isna().any(axis=None):
             missing_src = src_coords[src_coords[[config.lat_col, config.lon_col]].isna().any(axis=1)].index.unique().tolist()  # fmt: skip
             missing_dst = dst_coords[dst_coords[[config.lat_col, config.lon_col]].isna().any(axis=1)].index.unique().tolist()  # fmt: skip
             raise KeyError(
@@ -309,19 +310,27 @@ def build_all_session_transition_descriptors(
 
     df = checkins_df.copy()
     df[config.timestamp_col] = pd.to_datetime(df[config.timestamp_col], errors="coerce")
-    df = df.sort_values([config.session_id_col, config.timestamp_col, config.poi_id_col]).reset_index(
-        drop=True
-    )
+    df = df.sort_values(
+        [config.session_id_col, config.timestamp_col, config.poi_id_col]
+    ).reset_index(drop=True)
 
     groups = df.groupby(config.session_id_col, sort=False)
-    iterator = tqdm(groups, desc="Computing transitions", unit="session") if show_progress else groups
+    iterator = (
+        tqdm(groups, desc="Computing transitions", unit="session")
+        if show_progress
+        else groups
+    )
+
+    lookup_df = pd.DataFrame.from_dict(pair_lookup, orient="index")
+    lookup_df.index = pd.MultiIndex.from_tuples(lookup_df.index, names=["src_POIId", "dst_POIId"])  # fmt: skip
+    coord_df = pd.DataFrame.from_dict(poi_coord_map, orient="index")
 
     all_transitions: list[pd.DataFrame] = []
     for session_id, session_df in iterator:
         t = compute_single_session_transitions(
             session_df=session_df,
-            pair_lookup=pair_lookup,
-            poi_coord_map=poi_coord_map,
+            lookup_df=lookup_df,
+            coord_df=coord_df,
             config=config,
             session_id=session_id,
         )
@@ -360,7 +369,9 @@ if __name__ == "__main__":
     print("Number of checkins:", len(checkins_df))
     print("Number of unique POIs:", len(poi_df))
 
-    pair_lookup_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv")
+    pair_lookup_df = pd.read_csv(
+        scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv"
+    )
 
     pair_lookup = build_pair_lookup_dict(pair_lookup_df)
     poi_coord_map = build_poi_coord_map(poi_df, config)
@@ -371,5 +382,8 @@ if __name__ == "__main__":
     cache_path = scrip_dir / f"artifacts/{city}/{city}_session_transition.csv"
     session_transition_df.to_csv(cache_path)
 
-    pair_lookup.to_csv(scrip_dir / f"artifacts/{city}/{city}_pair_lookup.csv")
-    poi_coord_map.to_csv(scrip_dir / f"artifacts/{city}/{city}_poi_coord_map.csv")
+    with open(scrip_dir / f"artifacts/{city}/{city}_pair_lookup.pkl", "wb") as f:
+        pickle.dump(pair_lookup, f)
+
+    with open(scrip_dir / f"artifacts/{city}/{city}_poi_coord_map.pkl", "wb") as f:
+        pickle.dump(poi_coord_map, f)

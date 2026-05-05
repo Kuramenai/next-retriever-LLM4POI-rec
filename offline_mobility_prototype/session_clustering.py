@@ -105,9 +105,7 @@ def suggest_k_hdbscan(
         ascending=[False, True, True],
     )
 
-    ks = [
-        int(v) for v in diagnostics["n_clusters_excluding_noise"].tolist() if int(v) > 0
-    ]
+    ks = [int(v) for v in diagnostics["n_clusters_excluding_noise"].tolist() if int(v) > 0]
     if not ks:
         return {
             "suggested_k": None,
@@ -129,8 +127,7 @@ def suggest_k_hdbscan(
     # Build a compact candidate_K tuple around the suggested_k.
     # (Clip to >=2; include a small spread for BIC search.)
     cand = sorted(
-        {max(2, suggested_k + d) for d in (-10, -5, -2, 0, 2, 5, 10)}
-        | {max(2, k_min), max(2, k_max)}
+        {max(2, suggested_k + d) for d in (-10, -5, -2, 0, 2, 5, 10)} | {max(2, k_min), max(2, k_max)}
     )
 
     return {
@@ -163,11 +160,7 @@ def _build_assignment_table(
 
     sorted_probs = np.sort(proba, axis=1)[:, ::-1]
     top1 = sorted_probs[:, 0]
-    top2 = (
-        sorted_probs[:, 1]
-        if proba.shape[1] > 1
-        else np.zeros(len(proba), dtype=np.float32)
-    )
+    top2 = sorted_probs[:, 1] if proba.shape[1] > 1 else np.zeros(len(proba), dtype=np.float32)
     top2_gap = top1 - top2
 
     top_ids, top_scores = _top_m_from_proba(proba, top_m=top_m)
@@ -276,9 +269,7 @@ def fit_gmm_prototypes(
                         "bic": float(bic),
                         "aic": float(aic),
                         "train_avg_loglik": float(train_avg_loglik),
-                        "val_avg_loglik": float(val_avg_loglik)
-                        if not np.isnan(val_avg_loglik)
-                        else np.nan,
+                        "val_avg_loglik": float(val_avg_loglik) if not np.isnan(val_avg_loglik) else np.nan,
                         "converged": bool(gmm.converged_),
                         "n_iter": int(gmm.n_iter_),
                     }
@@ -339,18 +330,12 @@ def fit_gmm_prototypes(
     val_proba = best_model.predict_proba(X_val) if X_val is not None else None
     test_proba = best_model.predict_proba(X_test) if X_test is not None else None
 
-    train_assignments = _build_assignment_table(
-        train_proba, meta=train_meta, top_m=top_m
-    )
+    train_assignments = _build_assignment_table(train_proba, meta=train_meta, top_m=top_m)
     val_assignments = (
-        _build_assignment_table(val_proba, meta=val_meta, top_m=top_m)
-        if val_proba is not None
-        else None
+        _build_assignment_table(val_proba, meta=val_meta, top_m=top_m) if val_proba is not None else None
     )
     test_assignments = (
-        _build_assignment_table(test_proba, meta=test_meta, top_m=top_m)
-        if test_proba is not None
-        else None
+        _build_assignment_table(test_proba, meta=test_meta, top_m=top_m) if test_proba is not None else None
     )
 
     # ------------------------------------------------------------
@@ -363,9 +348,7 @@ def fit_gmm_prototypes(
     for k in range(best_model.n_components):
         component_mask = hard_train_labels == k
         component_size = int(component_mask.sum())
-        mean_posterior = (
-            float(train_proba[component_mask, k].mean()) if component_size > 0 else 0.0
-        )
+        mean_posterior = float(train_proba[component_mask, k].mean()) if component_size > 0 else 0.0
 
         prototype_rows.append(
             {
@@ -378,9 +361,7 @@ def fit_gmm_prototypes(
         )
 
     prototype_summary_df = (
-        pd.DataFrame(prototype_rows)
-        .sort_values(by="mixture_weight", ascending=False)
-        .reset_index(drop=True)
+        pd.DataFrame(prototype_rows).sort_values(by="mixture_weight", ascending=False).reset_index(drop=True)
     )
 
     return {
@@ -411,7 +392,7 @@ if __name__ == "__main__":
     cprint("Starting GMM prototypes fitting...", "yellow")
     cprint("Loading check-in data...", "yellow")
 
-    city = "nyc"
+    city = "tky"
     run_hdbscan_k_diagnostic = False
     scrip_dir = Path(__file__).resolve().parent.parent
     out_dir = scrip_dir / f"data/{city}"

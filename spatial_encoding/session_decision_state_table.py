@@ -27,12 +27,12 @@ import pandas as pd
 from termcolor import cprint
 from tqdm import tqdm
 
-from spatial_encoding.pair_transition_features_extraction import (
+from pair_transition_features_extraction import (
     compute_single_session_transitions,
     build_pair_lookup_dict,
     build_poi_coord_map,
 )
-from spatial_encoding.extract_poi_spatial_descriptors import SpatialEncodingConfig
+from extract_poi_spatial_descriptors import SpatialEncodingConfig
 
 
 def _decision_time_bin(ts: pd.Timestamp) -> str:
@@ -202,7 +202,7 @@ def build_decision_state_table(
     sessions_groups = df.groupby(config.session_id_col, sort=False)
     it = tqdm(sessions_groups, desc="Building decision states", unit="session")
     for session_id, sdf in it:
-        sdf = sdf.sort_values(config.timestamp_col, config.poi_id_col).reset_index(drop=True)
+        sdf = sdf.sort_values([config.timestamp_col, config.poi_id_col]).reset_index(drop=True)
         if len(sdf) < 2:
             cprint(f"Session {session_id} has less than 2 check-ins; skipping...", "yellow")
             continue
@@ -449,21 +449,22 @@ def build_current_decision_state(
 
 if __name__ == "__main__":
     config = SpatialEncodingConfig()
-    city = "nyc"
+    city = "tky"
     scrip_dir = Path(__file__).resolve().parent.parent
 
     cprint(f"\nLoading {city} train checkins dataframe...", "yellow")
     train_checkins_df = pd.read_csv(scrip_dir / f"data/{city}/train_sample.csv")
-    train_checkins_df_session_id_col_mapping = {
-        config.session_id_col: "SessionId",
-    }
-    train_checkins_df = train_checkins_df.rename(columns=train_checkins_df_session_id_col_mapping)
+    train_checkins_df = train_checkins_df.rename(columns={"pseudo_session_trajectory_id": "SessionId"})
+    print(train_checkins_df.columns)
 
     cprint(f"\nLoading {city} poi descriptor dataframe...", "yellow")
     poi_descriptor_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi_descriptor.csv")
 
     cprint(f"\nLoading {city} sessions transitions dataframe...", "yellow")
     session_transition_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_session_transition.csv")
+    session_transition_df = session_transition_df.rename(
+        columns={"pseudo_session_trajectory_id": "SessionId"}
+    )
 
     session_prototype_df = None
     gmm_path = scrip_dir / f"artifacts/{city}/{city}_gmm_cluster.pkl"
@@ -491,7 +492,7 @@ if __name__ == "__main__":
     decision_state_df = build_decision_state_table(
         checkins_df=train_checkins_df,
         poi_descriptor_df=poi_descriptor_df,
-        session_transition_df=session_transition_df,
+        session_transitions_df=session_transition_df,
         config=config,
         session_prototype_df=session_prototype_df,
     )

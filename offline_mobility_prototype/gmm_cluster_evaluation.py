@@ -157,9 +157,7 @@ def prototype_pool_next_poi_recall(
 
     # Map each hard prototype to the set of next POIs observed in training
     proto_to_next_pois = (
-        train_df.groupby("prototype_id")["next_poi"]
-        .apply(lambda x: set(x.dropna()))
-        .to_dict()
+        train_df.groupby("prototype_id")["next_poi"].apply(lambda x: set(x.dropna())).to_dict()
     )
 
     # Attach query labels by SessionId
@@ -212,7 +210,7 @@ def prototype_pool_next_poi_recall(
 
 
 if __name__ == "__main__":
-    city = "nyc"
+    city = "tky"
     scrip_dir = Path(__file__).resolve().parent.parent
 
     train_checkins = pd.read_csv(scrip_dir / f"data/{city}/train_sample.csv")

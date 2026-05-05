@@ -45,7 +45,7 @@ class SpatialEncodingConfig:
     road_distance_stretch_factor: float = 2.0
     distance_bin_edges_m: tuple = (250, 500, 1000, 2000, 5000)
 
-    session_id_col: str = "pseudo_session_trajectory_id"
+    session_id_col: str = "SessionId"
     user_id_col: str = "UserId"
     timestamp_col: str = "UTCTimeOffset"
     category_col: str = "PoiCategoryName"
@@ -278,7 +278,7 @@ if __name__ == "__main__":
         h3_res_coarse=8, h3_res_fine=9, density_radius_m=100.0, timestamp_col="Time"
     )
 
-    city = "nyc"
+    city = "tky"
     scrip_dir = Path(__file__).resolve().parent.parent
 
     cprint(f"\nLoading {city} raw checkins data...", "yellow")
