@@ -9,12 +9,14 @@ Pipeline:
 
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
 import pandas as pd
+from termcolor import cprint
 
-from spatial_encoding.retrieve_decisions_states import DecisionStateEncoder
+from spatial_encoding.retrieve_decisions_states import (
+    DecisionStateEncoder,
+    DecisionStateRetrievalIndex,
+)
 from spatial_encoding.retrieve_decisions_states import retrieve_similar_decision_states
 
 
@@ -77,6 +79,7 @@ def build_candidate_next_pois(
     ]
 
     if len(retrieved_cases_df) == 0:
+        cprint("No retrieved cases found.", "red")
         return pd.DataFrame(columns=empty_cols)
 
     if "next_POIId" not in retrieved_cases_df.columns:
@@ -88,12 +91,11 @@ def build_candidate_next_pois(
     df = df.loc[df["next_POIId"].notna()].copy()
 
     if len(df) == 0:
+        cprint("No retrieved cases with valid next POI ID found.", "red")
         return pd.DataFrame(columns=empty_cols)
 
     # Turn retrieval scores into normalized case weights
-    df["case_weight"] = _softmax_weights(
-        df[score_col].to_numpy(dtype=float), temperature
-    )
+    df["case_weight"] = _softmax_weights(df[score_col].to_numpy(dtype=float), temperature)  # fmt: skip
 
     agg_dict = {
         "case_weight": "sum",
@@ -119,11 +121,7 @@ def build_candidate_next_pois(
     if "next_category" in df.columns:
         next_cat = (
             df.groupby("next_POIId")["next_category"]
-            .agg(
-                lambda s: s.dropna().iloc[0]
-                if s.dropna().shape[0] > 0
-                else np.nan
-            )
+            .agg(lambda s: s.dropna().iloc[0] if s.dropna().shape[0] > 0 else np.nan)
             .reset_index()
         )
         grouped = grouped.merge(next_cat, on="next_POIId", how="left")
@@ -170,17 +168,16 @@ def aggregate_candidate_pois_from_retrieved_cases(
 
 def retrieve_candidate_next_pois(
     query_state,
-    case_base_df: pd.DataFrame,
     encoder: DecisionStateEncoder,
     config,
     *,
-    case_vectors: Optional[np.ndarray] = None,
-    case_coords: Optional[np.ndarray] = None,
+    retrieval_index: DecisionStateRetrievalIndex,
     top_k_cases: int = 50,
     top_m_pois: int = 20,
-    same_prototype_only: bool = True,
+    same_prototype_only: bool = False,
     exclude_same_session: bool = True,
-    temperature: float = 1.0,
+    prototype_union_k: int = 3,
+    temperature: float = 0.2,
 ) -> dict:
     """
     End-to-end: retrieve similar states → aggregate into candidate POIs.
@@ -189,15 +186,11 @@ def retrieve_candidate_next_pois(
     ----------
     query_state : Series or single-row DataFrame
         Output of build_current_decision_state().
-    case_base_df : DataFrame
-        Full training decision-state table (with next_POIId labels).
     encoder : DecisionStateEncoder
         Fitted encoder.
     config : SpatialEncodingConfig
-    case_vectors : ndarray, optional
-        Pre-computed encoder.transform(case_base_df). Shape (N, D).
-    case_coords : ndarray, optional
-        Pre-computed encoder.extract_coords(case_base_df). Shape (N, 2).
+    retrieval_index : DecisionStateRetrievalIndex
+        Pre-built retrieval index (see ``build_retrieval_index`` in retrieve_decisions_states).
     top_k_cases : int
         Number of similar states to retrieve.
     top_m_pois : int
@@ -217,14 +210,13 @@ def retrieve_candidate_next_pois(
     """
     retrieved_cases = retrieve_similar_decision_states(
         query_state=query_state,
-        case_base_df=case_base_df,
+        retrieval_index=retrieval_index,
         encoder=encoder,
         config=config,
-        case_vectors=case_vectors,
-        case_coords=case_coords,
         top_k=top_k_cases,
         same_prototype_only=same_prototype_only,
         exclude_same_session=exclude_same_session,
+        prototype_union_k=prototype_union_k,
     )
 
     candidate_pois = build_candidate_next_pois(

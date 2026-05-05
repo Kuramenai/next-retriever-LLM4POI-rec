@@ -55,6 +55,9 @@ class FrozenModule1Artifacts:
     category_svd: Optional[object]
     category_post_normalizer: Optional[object]
 
+    temporal_scaler: Optional[object] = None
+    category_scaler: Optional[object] = None
+
     spatial_scaler: object
     spatial_cols: list[str]
 
@@ -116,9 +119,9 @@ class FrozenModule1PrefixTransformer:
         region_col: str | None = None,
         h3_resolution: int = 8,
         session_id_col: str = "SessionId",
-        timestamp_col: str = "Time",
-        poi_id_col: str = "PId",
-        category_col: str = "Category",
+        checkin_time_col: str = "CheckinTime",
+        poi_id_col: str = "PoiId",
+        poi_category_name_col: str = "PoiCategoryName",
         lat_col: str = "Latitude",
         lon_col: str = "Longitude",
     ) -> "FrozenModule1PrefixTransformer":
@@ -132,6 +135,8 @@ class FrozenModule1PrefixTransformer:
             category_vectorizer=a["category_vectorizer"],
             category_svd=a.get("category_svd", None),
             category_post_normalizer=a.get("category_post_normalizer", None),
+            temporal_scaler=a.get("temporal_scaler"),
+            category_scaler=a.get("category_scaler"),
             spatial_scaler=a["spatial_scaler"],
             spatial_cols=list(a["spatial_cols"]),
         )
@@ -140,9 +145,9 @@ class FrozenModule1PrefixTransformer:
             region_col=region_col,
             h3_resolution=h3_resolution,
             session_id_col=session_id_col,
-            timestamp_col=timestamp_col,
+            checkin_time_col=checkin_time_col,
             poi_id_col=poi_id_col,
-            category_col=category_col,
+            poi_category_name_col=poi_category_name_col,
             lat_col=lat_col,
             lon_col=lon_col,
         )
@@ -188,7 +193,9 @@ class FrozenModule1PrefixTransformer:
         df = prefix_df.copy()
 
         # Resolve likely source columns
-        src_session = _first_present(df, [self.session_id_col, "SessionId", "session_id"])
+        src_session = _first_present(
+            df, [self.session_id_col, "SessionId", "session_id"]
+        )
         src_time = _first_present(
             df,
             [
@@ -200,8 +207,12 @@ class FrozenModule1PrefixTransformer:
                 "date_time",
             ],
         )
-        src_poi = _first_present(df, [self.poi_id_col, "PId", "PoiId", "POIId", "poi_id"])
-        src_cat = _first_present(df, [self.category_col, "Category", "PoiCategoryName", "category"])
+        src_poi = _first_present(
+            df, [self.poi_id_col, "PId", "PoiId", "POIId", "poi_id"]
+        )
+        src_cat = _first_present(
+            df, [self.category_col, "Category", "PoiCategoryName", "category"]
+        )
         src_lat = _first_present(df, [self.lat_col, "Latitude", "lat"])
         src_lon = _first_present(df, [self.lon_col, "Longitude", "lon", "lng"])
 
@@ -255,13 +266,25 @@ class FrozenModule1PrefixTransformer:
         # ---- Temporal block (6D) ----
         temp = extract_temporal_features(
             df,
+            checkin_time_col=self.checkin_time_col,
+            poi_id_col=self.poi_id_col,
             duration_mean=self.artifacts.duration_mean,
             duration_std=self.artifacts.duration_std,
         )
         x_temp = np.asarray(temp["vector"], dtype=np.float32).reshape(1, -1)
+        if self.artifacts.temporal_scaler is not None:
+            x_temp = np.asarray(
+                self.artifacts.temporal_scaler.transform(x_temp), dtype=np.float32
+            )
 
         # ---- Category block ----
-        cat_df = build_category_documents(df)
+        cat_df = build_category_documents(
+            df,
+            session_id_col=self.session_id_col,
+            checkin_time_col=self.checkin_time_col,
+            poi_id_col=self.poi_id_col,
+            poi_category_name_col=self.poi_category_name_col,
+        )
         if len(cat_df) != 1:
             raise RuntimeError(
                 f"Expected one category document for the prefix but got {len(cat_df)}."
@@ -279,9 +302,19 @@ class FrozenModule1PrefixTransformer:
         else:
             x_cat = np.asarray(x_tfidf.toarray(), dtype=np.float32)
 
+        if self.artifacts.category_scaler is not None:
+            x_cat = np.asarray(
+                self.artifacts.category_scaler.transform(x_cat), dtype=np.float32
+            )
+
         # ---- Spatial block (scaled) ----
         sp_df = build_session_spatial_aggregates(
             df,
+            session_id_col=self.session_id_col,
+            checkin_time_col=self.checkin_time_col,
+            poi_id_col=self.poi_id_col,
+            poi_latitude_col=self.lat_col,
+            poi_longitude_col=self.lon_col,
             region_col=self.region_col,
             h3_resolution=self.h3_resolution,
         )
@@ -303,4 +336,3 @@ class FrozenModule1PrefixTransformer:
             )
 
         return pd.DataFrame(x, columns=self._feature_cols)
-

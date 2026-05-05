@@ -123,9 +123,6 @@ def build_sparse_pair_transition_lookup(
     """
     Build a sparse pairwise transition lookup over nearby POIs within a strict radius.
 
-    Note on Transit: Because the target cities (NYC/Tokyo) rely heavily on transit,
-    ensure `config.distance_bin_edges_m` extends to larger bounds (e.g., 3000, 5000, 10000)
-    to capture subway jumps, and ensure the road_graph is a pedestrian ('walk') graph.
     """
     required_cols = [config.poi_id_col, config.lat_col, config.lon_col]
     if missing := [c for c in required_cols if c not in poi_df.columns]:
@@ -145,7 +142,6 @@ def build_sparse_pair_transition_lookup(
     coords_rad = np.radians(coords_deg)
     tree = BallTree(coords_rad, metric="haversine")
 
-    # LOGICAL FIX: Use strict radius (e.g., 3km) instead of rigid Top-K
     radius_m = max_radius_m
     radius_rad = radius_m / EARTH_RADIUS_M
     neighbor_indices_list, neighbor_dists_rad_list = tree.query_radius(
@@ -183,7 +179,7 @@ def build_sparse_pair_transition_lookup(
                 sp_lengths_master.update(result)
                 pbar.update(future_to_size[future])
 
-    # SCALABILITY FIX: Columnar allocation prevents OOM from millions of dictionaries
+
     cols = {
         "src_POIId": [],
         "dst_POIId": [],
@@ -221,7 +217,7 @@ def build_sparse_pair_transition_lookup(
 
         used_haversine_fallback = np.isnan(road_distances_m)
 
-        # LOGICAL FIX: Scale the Haversine fallback to mimic road network penalties
+        # Scale the Haversine fallback to mimic road network penalties
         scaled_haversine = tgt_haversine_m * float(config.road_distance_stretch_factor)
         final_distance_m = np.where(used_haversine_fallback, scaled_haversine, road_distances_m)
         distance_bins = _bin_distances_m(final_distance_m, edges_m=tuple(config.distance_bin_edges_m))

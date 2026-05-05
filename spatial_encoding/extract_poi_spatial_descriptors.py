@@ -49,6 +49,7 @@ class SpatialEncodingConfig:
     user_id_col: str = "UserId"
     timestamp_col: str = "UTCTimeOffset"
     category_col: str = "PoiCategoryName"
+    poi_id_col: str = "PoiId"
     gap_bin_edges_min: tuple = (15, 30, 60, 120, 240)
 
 
