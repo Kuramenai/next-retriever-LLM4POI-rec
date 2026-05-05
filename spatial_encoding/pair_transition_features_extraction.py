@@ -104,17 +104,19 @@ def build_pair_lookup_dict(
     Convert sparse pair-transition DataFrame into a fast dict including
     both binned and raw continuous values.
     """
-    keep = ["src_POIId", "dst_POIId"]
-    for col in [
+    keep = [
+        "src_POIId",
+        "dst_POIId",
         "distance_bin",
         "direction_bin",
         "final_distance_m",
         "bearing_deg",
         "haversine_distance_m",
-    ]:
-        if col in pair_lookup_df.columns:
-            keep.append(col)
+    ]
 
+    missing = [c for c in keep if c not in pair_lookup_df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns in pair_lookup_df: {missing}")
     return (
         pair_lookup_df[keep]
         .drop_duplicates(subset=["src_POIId", "dst_POIId"], keep="first")
@@ -222,9 +224,9 @@ def compute_single_session_transitions(
         coord_df = pd.DataFrame.from_dict(poi_coord_map, orient="index")
         src_coords = coord_df.reindex(src_poi)
         dst_coords = coord_df.reindex(dst_poi)
-        if src_coords[[config.lat_col, config.lon_col]].isna().any(
-            axis=None
-        ) or dst_coords[[config.lat_col, config.lon_col]].isna().any(axis=None):
+        if src_coords[[config.lat_col, config.lon_col]].isna().any(axis=None) or dst_coords[
+            [config.lat_col, config.lon_col]
+        ].isna().any(axis=None):
             missing_src = src_coords[src_coords[[config.lat_col, config.lon_col]].isna().any(axis=1)].index.unique().tolist()  # fmt: skip
             missing_dst = dst_coords[dst_coords[[config.lat_col, config.lon_col]].isna().any(axis=1)].index.unique().tolist()  # fmt: skip
             raise KeyError(
@@ -285,8 +287,8 @@ def compute_single_session_transitions(
 
 def build_all_session_transition_descriptors(
     checkins_df: pd.DataFrame,
-    pair_lookup_df: pd.DataFrame,
-    poi_df: pd.DataFrame,
+    pair_lookup: dict[tuple, dict],
+    poi_coord_map: dict,
     config,
     *,
     show_progress: bool = True,
@@ -298,28 +300,21 @@ def build_all_session_transition_descriptors(
     """
     required_cols = [
         config.session_id_col,
-        config.poi_id_col,
         config.timestamp_col,
+        config.poi_id_col,
     ]
     missing = [c for c in required_cols if c not in checkins_df.columns]
     if missing:
         raise ValueError(f"Missing required columns in checkins_df: {missing}")
 
-    pair_lookup = build_pair_lookup_dict(pair_lookup_df)
-    poi_coord_map = build_poi_coord_map(poi_df, config)
-
     df = checkins_df.copy()
     df[config.timestamp_col] = pd.to_datetime(df[config.timestamp_col], errors="coerce")
-    df = df.sort_values([config.session_id_col, config.timestamp_col]).reset_index(
+    df = df.sort_values([config.session_id_col, config.timestamp_col, config.poi_id_col]).reset_index(
         drop=True
     )
 
     groups = df.groupby(config.session_id_col, sort=False)
-    iterator = (
-        tqdm(groups, desc="Computing transitions", unit="session")
-        if show_progress
-        else groups
-    )
+    iterator = tqdm(groups, desc="Computing transitions", unit="session") if show_progress else groups
 
     all_transitions: list[pd.DataFrame] = []
     for session_id, session_df in iterator:
@@ -365,12 +360,16 @@ if __name__ == "__main__":
     print("Number of checkins:", len(checkins_df))
     print("Number of unique POIs:", len(poi_df))
 
-    pair_lookup_df = pd.read_csv(
-        scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv"
-    )
+    pair_lookup_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv")
+
+    pair_lookup = build_pair_lookup_dict(pair_lookup_df)
+    poi_coord_map = build_poi_coord_map(poi_df, config)
 
     session_transition_df = build_all_session_transition_descriptors(
-        checkins_df, pair_lookup_df, poi_df, config
+        checkins_df, pair_lookup, poi_coord_map, config
     )
     cache_path = scrip_dir / f"artifacts/{city}/{city}_session_transition.csv"
     session_transition_df.to_csv(cache_path)
+
+    pair_lookup.to_csv(scrip_dir / f"artifacts/{city}/{city}_pair_lookup.csv")
+    poi_coord_map.to_csv(scrip_dir / f"artifacts/{city}/{city}_poi_coord_map.csv")

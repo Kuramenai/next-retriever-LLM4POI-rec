@@ -62,10 +62,7 @@ def _haversine_from_one_to_many_m(
     dlat = lats2_rad - lat1_rad
     dlon = lons2_rad - lon1_rad
 
-    a = (
-        np.sin(dlat / 2.0) ** 2
-        + np.cos(lat1_rad) * np.cos(lats2_rad) * np.sin(dlon / 2.0) ** 2
-    )
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1_rad) * np.cos(lats2_rad) * np.sin(dlon / 2.0) ** 2
     c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
     return EARTH_RADIUS_M * c
 
@@ -80,9 +77,7 @@ def _bearing_from_one_to_many_deg(
     dlon = lons2_rad - lon1_rad
 
     y = np.sin(dlon) * np.cos(lats2_rad)
-    x = np.cos(lat1_rad) * np.sin(lats2_rad) - np.sin(lat1_rad) * np.cos(
-        lats2_rad
-    ) * np.cos(dlon)
+    x = np.cos(lat1_rad) * np.sin(lats2_rad) - np.sin(lat1_rad) * np.cos(lats2_rad) * np.cos(dlon)
     bearings = np.degrees(np.arctan2(y, x))
     return (bearings + 360.0) % 360.0
 
@@ -106,9 +101,7 @@ def _distance_bin_labels(edges_m: tuple[float, ...]) -> list[str]:
 def _bin_distances_m(distances_m: np.ndarray, edges_m: tuple[float, ...]) -> np.ndarray:
     bins = [0.0, *edges_m, np.inf]
     labels = _distance_bin_labels(edges_m)
-    return pd.cut(
-        distances_m, bins=bins, labels=labels, include_lowest=True, right=True
-    ).astype(object)
+    return pd.cut(distances_m, bins=bins, labels=labels, include_lowest=True, right=True).astype(object)
 
 
 def build_sparse_pair_transition_lookup(
@@ -171,8 +164,7 @@ def build_sparse_pair_transition_lookup(
         futures = [executor.submit(_compute_dijkstra_chunk, chunk, cutoff_m) for chunk in node_chunks]
         
         # Map each future → its chunk size
-        future_to_size = {
-        future: size for future, size in zip(futures, chunk_sizes)}
+        future_to_size = {future: size for future, size in zip(futures, chunk_sizes)}
         with tqdm(total=total_nodes, desc="Processing nodes", unit="node") as pbar:
             for future in concurrent.futures.as_completed(futures):
                 result = future.result()
