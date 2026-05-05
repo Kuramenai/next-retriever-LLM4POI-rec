@@ -215,15 +215,11 @@ def build_poi_spatial_descriptors(
     descriptor_df = poi_df.copy()
 
     descriptor_df["region_coarse_token"] = poi_gdf_wgs84.apply(
-        lambda row: h3.latlng_to_cell(
-            row[config.lat_col], row[config.lon_col], config.h3_res_coarse
-        ),
+        lambda row: h3.latlng_to_cell(row[config.lat_col], row[config.lon_col], config.h3_res_coarse),
         axis=1,
     )
     descriptor_df["region_fine_token"] = poi_gdf_wgs84.apply(
-        lambda row: h3.latlng_to_cell(
-            row[config.lat_col], row[config.lon_col], config.h3_res_fine
-        ),
+        lambda row: h3.latlng_to_cell(row[config.lat_col], row[config.lon_col], config.h3_res_fine),
         axis=1,
     )
     cprint("Assignment done.", "green")

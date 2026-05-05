@@ -36,13 +36,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Union
 
-import pickle
+
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from termcolor import cprint
+from tqdm import tqdm
 from sklearn.preprocessing import StandardScaler
+
+
 from spatial_encoding.extract_poi_spatial_descriptors import SpatialEncodingConfig
+from spatial_encoding.session_decision_state_table import build_current_decision_state
 
 
 EARTH_RADIUS_M = 6_371_008.8
@@ -110,13 +114,7 @@ class RetrievalBlockWeights:
 
     @property
     def non_spatial_total(self) -> float:
-        return (
-            self.temporal
-            + self.local_context
-            + self.movement
-            + self.prefix_summary
-            + self.category
-        )
+        return self.temporal + self.local_context + self.movement + self.prefix_summary + self.category
 
     @property
     def total(self) -> float:
@@ -173,10 +171,7 @@ def _haversine_one_to_many_m(
     dlat = lats2_r - lat1_r
     dlon = lons2_r - lon1_r
 
-    a = (
-        np.sin(dlat / 2.0) ** 2
-        + np.cos(lat1_r) * np.cos(lats2_r) * np.sin(dlon / 2.0) ** 2
-    )
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1_r) * np.cos(lats2_r) * np.sin(dlon / 2.0) ** 2
     c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
     return EARTH_RADIUS_M * c
 
@@ -194,10 +189,7 @@ def _haversine_one_to_many_m_from_radians(
     dlat = lats2_r - lat1_r
     dlon = lons2_r - lon1_r
 
-    a = (
-        np.sin(dlat / 2.0) ** 2
-        + np.cos(lat1_r) * np.cos(lats2_r) * np.sin(dlon / 2.0) ** 2
-    )
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1_r) * np.cos(lats2_r) * np.sin(dlon / 2.0) ** 2
     c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
     return EARTH_RADIUS_M * c
 
@@ -490,21 +482,15 @@ class DecisionStateEncoder:
         blocks.append(_l2_normalize(temporal) * w.temporal)
 
         # Local context
-        context = self._context_scaler.transform(
-            self._extract_context(row).reshape(1, -1)
-        )[0]
+        context = self._context_scaler.transform(self._extract_context(row).reshape(1, -1))[0]
         blocks.append(_l2_normalize(context) * w.local_context)
 
         # Movement
-        movement = self._movement_scaler.transform(
-            self._extract_movement(row).reshape(1, -1)
-        )[0]
+        movement = self._movement_scaler.transform(self._extract_movement(row).reshape(1, -1))[0]
         blocks.append(_l2_normalize(movement) * w.movement)
 
         # Prefix summary
-        prefix = self._prefix_scaler.transform(
-            self._extract_prefix_summary(row).reshape(1, -1)
-        )[0]
+        prefix = self._prefix_scaler.transform(self._extract_prefix_summary(row).reshape(1, -1))[0]
         blocks.append(_l2_normalize(prefix) * w.prefix_summary)
 
         # Category
@@ -542,19 +528,13 @@ class DecisionStateEncoder:
         temporal = self._l2_normalize_rows(temporal) * float(w.temporal)
 
         context = self._context_scaler.transform(self._extract_context_batch(df))
-        context = self._l2_normalize_rows(
-            context.astype(np.float32, copy=False)
-        ) * float(w.local_context)
+        context = self._l2_normalize_rows(context.astype(np.float32, copy=False)) * float(w.local_context)
 
         movement = self._movement_scaler.transform(self._extract_movement_batch(df))
-        movement = self._l2_normalize_rows(
-            movement.astype(np.float32, copy=False)
-        ) * float(w.movement)
+        movement = self._l2_normalize_rows(movement.astype(np.float32, copy=False)) * float(w.movement)
 
         prefix = self._prefix_scaler.transform(self._extract_prefix_batch(df))
-        prefix = self._l2_normalize_rows(prefix.astype(np.float32, copy=False)) * float(
-            w.prefix_summary
-        )
+        prefix = self._l2_normalize_rows(prefix.astype(np.float32, copy=False)) * float(w.prefix_summary)
 
         cat = self._extract_category_onehot_batch(df)
         if cat.shape[1] > 0:
@@ -778,9 +758,7 @@ def retrieve_similar_decision_states(
                     pass
 
         if proto_ids:
-            buckets = [
-                idx.prototype_to_indices.get(p) for p in dict.fromkeys(proto_ids)
-            ]
+            buckets = [idx.prototype_to_indices.get(p) for p in dict.fromkeys(proto_ids)]
             buckets = [b for b in buckets if b is not None and b.size > 0]
             if buckets:
                 cand_idx = np.unique(np.concatenate(buckets))
@@ -820,9 +798,7 @@ def retrieve_similar_decision_states(
             )
         else:
             coords = idx.case_coords[cand_idx]
-            distances_m = _haversine_one_to_many_m(
-                query_lat, query_lon, coords[:, 0], coords[:, 1]
-            )
+            distances_m = _haversine_one_to_many_m(query_lat, query_lon, coords[:, 0], coords[:, 1])
         tau = float(encoder.spatial_kernel.tau_m)
         spatial_scores = np.exp(-distances_m / tau).astype(np.float32)
         spatial_scores = np.where(np.isnan(spatial_scores), 0.0, spatial_scores)
@@ -846,34 +822,82 @@ def retrieve_similar_decision_states(
 
 if __name__ == "__main__":
     city = "nyc"
-    config = SpatialEncodingConfig()
+
     scrip_dir = Path(__file__).resolve().parent.parent
+    decision_state_table_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_decision_state_table.csv")
+
+    config = SpatialEncodingConfig()
     encoder = DecisionStateEncoder(config=config)
-    decision_state_table_df = pd.read_csv(
-        scrip_dir / f"artifacts/{city}/{city}_decision_state_table.csv"
-    )
     encoder.fit(decision_state_table_df)
     case_vectors = encoder.transform(decision_state_table_df)
     case_coords = encoder.extract_coords(decision_state_table_df)
 
-    with open(scrip_dir / f"artifacts/{city}/{city}_case_vectors.pkl", "wb") as f:
-        pickle.dump(case_vectors, f)
+    retrieval_index = build_retrieval_index(
+        case_base_df=decision_state_table_df,
+        case_vectors=case_vectors,
+        config=config,
+        case_coords=case_coords,
+    )
 
-    with open(scrip_dir / f"artifacts/{city}/{city}_case_coords.pkl", "wb") as f:
-        pickle.dump(case_coords, f)
+    sid_col = config.session_id_col
+    ts_col = config.timestamp_col
+    poi_id_col = config.poi_id_col
 
-    with open(scrip_dir / f"artifacts/{city}/{city}_case_encoder.pkl", "wb") as f:
-        pickle.dump(encoder, f)
+    test_checkins = pd.read_csv(scrip_dir / f"data/{city}/test_sample.csv")
+    test_checkins = test_checkins.rename({sid_col: "SessionId"})
+    test_checkins[ts_col] = pd.to_datetime(test_checkins[ts_col], errors="coerce")
+    test_checkins = test_checkins.sort_values([sid_col, ts_col, poi_id_col]).reset_index(drop=True)
 
-    sample = decision_state_table_df.sample(min(200, len(decision_state_table_df)), random_state=42).reset_index(drop=True)  # fmt: skip
+    sessions_groups = test_checkins.groupby(sid_col, sort=False)
+    it = tqdm(sessions_groups, desc="Retrieving decision states", unit="session")
 
-    X_batch = encoder.transform(sample)
+    queries, next_pois, retrieved_cases = [], [], []
+    for session_id, session_df in it:
+        session_df = session_df.sort_values([ts_col, poi_id_col]).reset_index(drop=True)
+        session_prefix = session_df.iloc[:-1].copy().reset_index(drop=True)
+        session_next_poi = session_df.iloc[-1].copy()
 
-    for i in range(len(sample)):
-        x_single = encoder.transform_single(sample.iloc[i])
-        if not np.allclose(X_batch[i], x_single, atol=1e-5, equal_nan=True):
-            print("Mismatch at row", i)
-            print("Session:", sample.iloc[i].get(config.session_id_col))
-            break
-    else:
-        print("Batch and single-row encodings are consistent.")
+        query_state = build_current_decision_state(session_prefix, decision_state_table_df, config)
+        result = retrieve_similar_decision_states(query_state, retrieval_index, encoder, config)
+
+        queries.append(session_prefix)
+        next_pois.append(session_next_poi)
+        retrieved_cases.append(result)
+        # print(result)
+
+    # with open(scrip_dir / f"artifacts/{city}/{city}_case_vectors.pkl", "wb") as f:
+    #     pickle.dump(case_vectors, f)
+
+    # with open(scrip_dir / f"artifacts/{city}/{city}_case_coords.pkl", "wb") as f:
+    #     pickle.dump(case_coords, f)
+
+    # with open(scrip_dir / f"artifacts/{city}/{city}_case_encoder.pkl", "wb") as f:
+    #     pickle.dump(encoder, f)
+
+    # sample = decision_state_table_df.sample(min(200, len(decision_state_table_df)), random_state=42).reset_index(drop=True)  # fmt: skip
+
+    # X_batch = encoder.transform(sample)
+
+    # for i in range(len(sample)):
+    #     x_single = encoder.transform_single(sample.iloc[i])
+    #     if not np.allclose(X_batch[i], x_single, atol=1e-5, equal_nan=True):
+    #         print("Mismatch at row", i)
+    #         print("Session:", sample.iloc[i].get(config.session_id_col))
+    #         break
+    # else:
+    #     print("Batch and single-row encodings are consistent.")
+
+    # encoder = DecisionStateEncoder(config)
+    # encoder.fit(case_base_df)
+    # case_vectors = encoder.transform(case_base_df)
+    # case_coords = encoder.extract_coords(case_base_df)
+    # retrieval_index = build_retrieval_index(
+    #     case_base_df=case_base_df,
+    #     case_vectors=case_vectors,
+    #     config=config,
+    #     case_coords=case_coords,
+    # )
+
+    # result = retrieve_similar_decision_states(
+    #     query_state, retrieval_index, encoder, config
+    # )
