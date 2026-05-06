@@ -25,9 +25,7 @@ from end_to_end_pipeline import (
 try:
     from vllm import LLM, SamplingParams  # type: ignore[import-not-found]
 except ImportError as e:
-    raise ImportError(
-        "vllm is required for make_vllm_generate_fn. Install with: pip install vllm"
-    ) from e
+    raise ImportError("vllm is required for make_vllm_generate_fn. Install with: pip install vllm") from e
 
 from spatial_encoding.retrieve_decisions_states import (
     RetrievalBlockWeights,
@@ -131,8 +129,7 @@ def make_openai_chat_generate_fn(
         from openai import OpenAI  # type: ignore[import-not-found]
     except ImportError as e:
         raise ImportError(
-            "openai package is required for make_openai_chat_generate_fn. "
-            "Install with: pip install openai"
+            "openai package is required for make_openai_chat_generate_fn. Install with: pip install openai"
         ) from e
 
     key = api_key or os.environ.get("OPENAI_API_KEY")
@@ -330,20 +327,29 @@ def build_retrieval_caches(
 
 if __name__ == "__main__":
     city = "nyc"
-    scrip_dir = Path(__file__).resolve().parent.parent
+    script_dir = Path(__file__).resolve().parent.parent
     config = SpatialEncodingConfig()
 
     cprint("Loading artifacts", "yellow")
-    with open(scrip_dir / f"artifacts/{city}/{city}_features.pkl", "rb") as f:
+    with open(script_dir / f"artifacts/{city}/{city}_features.pkl", "rb") as f:
         features = pickle.load(f)
 
-    poi_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi_meta.csv")
-    poi_descriptor_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi_descriptor.csv")  # fmt: skip
-    pair_lookup_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv")  # fmt: skip
-    decision_state_case_base_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_decision_state_table.csv")  # fmt: skip
+    poi_df = pd.read_csv(script_dir / f"artifacts/{city}/{city}_poi_meta.csv")
+    poi_descriptor_df = pd.read_csv(script_dir / f"artifacts/{city}/{city}_poi_descriptor.csv")  # fmt: skip
+    pair_lookup_df = pd.read_csv(script_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv")  # fmt: skip
+    decision_state_case_base_df = pd.read_csv(script_dir / f"artifacts/{city}/{city}_decision_state_table.csv")  # fmt: skip
+
+    with open(script_dir / f"artifacts/{city}/{city}_pair_lookup.pkl", "rb") as f:
+        pair_lookup = pickle.load(f)
+    with open(script_dir / f"artifacts/{city}/{city}_poi_coord_map.pkl", "rb") as f:
+        poi_coord_map = pickle.load(f)
+
+    lookup_df = pd.DataFrame.from_dict(pair_lookup, orient="index")
+    lookup_df.index = pd.MultiIndex.from_tuples(lookup_df.index, names=["src_POIId", "dst_POIId"])  # fmt: skip
+    coord_df = pd.DataFrame.from_dict(poi_coord_map, orient="index")
 
     cprint("Loading fitted GMM", "yellow")
-    with open(scrip_dir / f"artifacts/{city}/{city}_gmm_cluster.pkl", "rb") as f:
+    with open(script_dir / f"artifacts/{city}/{city}_gmm_cluster.pkl", "rb") as f:
         gmm = pickle.load(f)
     fitted_gmm = gmm["model"]
 
@@ -369,19 +375,17 @@ if __name__ == "__main__":
 
     assets = EndToEndAssets(
         config=config,
-        poi_df=poi_df,
         poi_descriptor_df=poi_descriptor_df,
-        pair_lookup_df=pair_lookup_df,
         decision_state_case_base_df=decision_state_case_base_df,
         decision_state_encoder=encoder,
         decision_state_case_vectors=case_vectors,
-        decision_state_case_coords=case_coords,  # <-- add this for spatial kernel speed
-        decision_state_retrieval_index=retrieval_index,  # <-- big retrieval speedup
-        prototype_router=prototype_router,  # optional
-        prototype_caption_map=None,  # optional
-        pair_lookup_dict=None,  # optional (perf)
-        poi_coord_map=None,  # optional (perf)
-        prototype_union_k=3,  # retrieve over union of top-3 routed prototypes
+        decision_state_case_coords=case_coords,
+        decision_state_retrieval_index=retrieval_index,
+        prototype_router=prototype_router,
+        prototype_caption_map=None,
+        lookup_df=lookup_df,
+        coord_df=coord_df,
+        prototype_union_k=3,
     )
 
     cprint("Launching VLLM", "yellow")
@@ -400,7 +404,7 @@ if __name__ == "__main__":
     )
 
     cprint("Inference", "yellow")
-    test_sample_df = pd.read_csv(scrip_dir / f"data/{city}/test_sample.csv")
+    test_sample_df = pd.read_csv(script_dir / f"data/{city}/test_sample.csv")
 
     batch_results = pipeline.predict_batch_from_test_checkins_batched_retrieval_and_llm(
         test_sample_df,
@@ -415,11 +419,11 @@ if __name__ == "__main__":
     if len(evaluated) > 0:
         acc = float(evaluated["is_correct_at_1"].mean())
         cprint(f"Hit@1 over {len(evaluated)} sessions: {acc:.4f}", "green")
-    out_path = scrip_dir / f"artifacts/{city}/{city}_batch_inference_results.csv"
+    out_path = script_dir / f"artifacts/{city}/{city}_batch_inference_results.csv"
     batch_results.to_csv(out_path, index=False)
     cprint(f"Wrote batch results to {out_path}", "green")
 
     cprint("Writing prompts and responses to file", "yellow")
-    out_path = (scrip_dir / f"artifacts/{city}/{city}_batch_inference_prompts_responses.csv")  # fmt: skip
+    out_path = (script_dir / f"artifacts/{city}/{city}_batch_inference_prompts_responses.csv")  # fmt: skip
     # prompts_responses.to_csv(out_path, index=False)
     cprint(f"Wrote prompts and responses to {out_path}", "green")

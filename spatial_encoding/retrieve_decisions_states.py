@@ -407,8 +407,8 @@ class DecisionStateEncoder:
             raise ValueError("Category vocabulary not found. Call fit() first.")
             # return np.zeros((len(df), 0), dtype=np.float32)
         if "current_category" not in df.columns:
+            # return np.zeros((len(df), len(self._category_vocab)), dtype=np.float32)
             raise ValueError("current_category column not found in DataFrame.")
-            return np.zeros((len(df), len(self._category_vocab)), dtype=np.float32)
 
         cats = df["current_category"].astype(str)
         codes = cats.map(self._category_to_idx).to_numpy(dtype=np.float32)
@@ -452,7 +452,9 @@ class DecisionStateEncoder:
             cats = case_base_df["current_category"].dropna().unique().tolist()
             self._category_vocab = sorted(str(c) for c in cats)
         else:
-            self._category_vocab = []
+            # self._category_vocab = []
+            raise ValueError("current_category column not found in case_base_df.")
+
         self._category_to_idx = {c: i for i, c in enumerate(self._category_vocab)}
 
         # Total non-spatial vector dimension

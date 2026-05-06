@@ -160,9 +160,6 @@ def build_decision_state_table(
         bad_count = int(df[config.timestamp_col].isna().sum())
         raise ValueError(f"{bad_count} rows have invalid timestamps after parsing.")
 
-    sort_cols = [config.session_id_col, config.timestamp_col, config.poi_id_col]
-    df = df.sort_values(sort_cols).reset_index(drop=True)
-
     # ------------------------------------------------------------------
     # Build reusable maps
     # ------------------------------------------------------------------
@@ -321,10 +318,8 @@ def build_current_decision_state(
     poi_descriptor_df: pd.DataFrame,
     config,
     *,
-    pair_lookup_df: Optional[pd.DataFrame] = None,
-    poi_df: Optional[pd.DataFrame] = None,
-    _pair_lookup: Optional[dict] = None,
-    _poi_coord_map: Optional[dict] = None,
+    lookup_df: pd.DataFrame,
+    coord_df: pd.DataFrame,
     prototype_signals: Optional[Union[dict, pd.Series, pd.DataFrame]] = None,
     recent_k: int = 2,
 ) -> pd.DataFrame:
@@ -349,18 +344,6 @@ def build_current_decision_state(
     if len(partial_session_df) == 0:
         raise ValueError("partial_session_df must contain at least one observed check-in.")  # fmt: skip
 
-    if _pair_lookup is None:
-        if pair_lookup_df is None:
-            raise ValueError("Provide either _pair_lookup or pair_lookup_df.")
-        cprint("[DEBUG] _pair_lookup is None, building it...", "red")
-        _pair_lookup = build_pair_lookup_dict(pair_lookup_df)
-
-    if _poi_coord_map is None:
-        if poi_df is None:
-            raise ValueError("Provide either _poi_coord_map or poi_df.")
-        cprint("[DEBUG] _poi_coord_map is None, building it...", "red")
-        _poi_coord_map = build_poi_coord_map(poi_df, config)
-
     df = partial_session_df.copy()
     if not pd.api.types.is_datetime64_any_dtype(df[config.timestamp_col]):
         df[config.timestamp_col] = pd.to_datetime(df[config.timestamp_col], errors="coerce")  # fmt: skip
@@ -376,8 +359,8 @@ def build_current_decision_state(
     # Build observed transitions on the prefix
     transition_df = compute_single_session_transitions(
         session_df=df,
-        pair_lookup=_pair_lookup,
-        poi_coord_map=_poi_coord_map,
+        lookup_df=lookup_df,
+        coord_df=coord_df,
         config=config,
     )
 

@@ -105,9 +105,7 @@ class Module1PrototypeRouter:
         if not isinstance(feat_df, pd.DataFrame):
             raise TypeError("prefix_feature_transform_fn must return a DataFrame.")
         if len(feat_df) != 1:
-            raise ValueError(
-                "prefix_feature_transform_fn must return exactly one row for one prefix."
-            )
+            raise ValueError("prefix_feature_transform_fn must return exactly one row for one prefix.")
 
         # Align to the exact training schema
         x_df = feat_df.reindex(columns=self.feature_cols, fill_value=0.0)
@@ -161,6 +159,8 @@ class EndToEndAssets:
     poi_df: pd.DataFrame
     poi_descriptor_df: pd.DataFrame
     pair_lookup_df: pd.DataFrame
+    lookup_df: pd.DataFrame
+    coord_df: pd.DataFrame
 
     # Module 1 / retrieval assets
     decision_state_case_base_df: pd.DataFrame
@@ -251,11 +251,9 @@ class NextPOIEndToEndPipeline:
         return build_current_decision_state(
             partial_session_df=prefix_df,
             poi_descriptor_df=self.assets.poi_descriptor_df,
-            pair_lookup_df=self.assets.pair_lookup_df,
-            poi_df=self.assets.poi_df,
+            lookup_df=self.assets.lookup_df,
+            coord_df=self.assets.coord_df,
             config=self.assets.config,
-            _pair_lookup=self.assets.pair_lookup_dict,
-            _poi_coord_map=self.assets.poi_coord_map,
             prototype_signals=prototype_signals,
             recent_k=self.assets.recent_k,
         )
@@ -347,11 +345,9 @@ class NextPOIEndToEndPipeline:
         current_state_df = build_current_decision_state(
             partial_session_df=prefix_df,
             poi_descriptor_df=self.assets.poi_descriptor_df,
-            pair_lookup_df=self.assets.pair_lookup_df,
-            poi_df=self.assets.poi_df,
+            lookup_df=self.assets.lookup_df,
+            coord_df=self.assets.coord_df,
             config=self.assets.config,
-            _pair_lookup=self.assets.pair_lookup_dict,
-            _poi_coord_map=self.assets.poi_coord_map,
             prototype_signals=prototype_signals,
             recent_k=self.assets.recent_k,
         )
@@ -572,13 +568,9 @@ class NextPOIEndToEndPipeline:
                 continue
 
             try:
-                prefix_df, gold_next = self.build_test_query_from_full_session(
-                    session_df
-                )
+                prefix_df, gold_next = self.build_test_query_from_full_session(session_df)
                 prototype_signals = self.infer_prototype_signals(prefix_df)
-                current_state_df = self.build_current_state(
-                    prefix_df, prototype_signals=prototype_signals
-                )
+                current_state_df = self.build_current_state(prefix_df, prototype_signals=prototype_signals)
                 retrieved_cases_df = self.retrieve_cases(current_state_df)
                 candidate_pois_df = self.aggregate_candidates(retrieved_cases_df)
                 prompt_payload = self.build_prompt_payload(
@@ -647,9 +639,7 @@ class NextPOIEndToEndPipeline:
                 selected = self.llm_parse_fn(llm_text, fallback_ids)
                 rec["selected_poi_id"] = selected
                 gold = rec.get("gold_next_poi_id", None)
-                rec["is_correct_at_1"] = (
-                    (selected == gold) if gold is not None else None
-                )
+                rec["is_correct_at_1"] = (selected == gold) if gold is not None else None
                 if include_details:
                     rec["llm_raw_text"] = llm_text
             except Exception as e:
@@ -801,12 +791,7 @@ class NextPOIEndToEndPipeline:
                 )
 
         if not query_vecs:
-            return pd.DataFrame(
-                [
-                    {k: v for k, v in r.items() if not k.startswith("_")}
-                    for r in session_meta
-                ]
-            )
+            return pd.DataFrame([{k: v for k, v in r.items() if not k.startswith("_")} for r in session_meta])
 
         Q = np.vstack(query_vecs).astype(np.float32, copy=False)  # (B, D)
 
@@ -835,9 +820,7 @@ class NextPOIEndToEndPipeline:
 
         for bucket, q_indices in bucket_to_qidx.items():
             cand_idx = (
-                idx.prototype_to_indices.get(int(bucket), idx.all_idx)
-                if bucket is not None
-                else idx.all_idx
+                idx.prototype_to_indices.get(int(bucket), idx.all_idx) if bucket is not None else idx.all_idx
             )
 
             V = idx.case_vectors_unit[cand_idx].astype(np.float32, copy=False)  # (M, D)
@@ -928,22 +911,17 @@ class NextPOIEndToEndPipeline:
 
         # indices in session_meta that correspond to built queries
         query_meta_indices = [
-            i
-            for i, r in enumerate(session_meta)
-            if r.get("error") is None and not r.get("skipped")
+            i for i, r in enumerate(session_meta) if r.get("error") is None and not r.get("skipped")
         ]
 
         system_prompts: list[str] = ["" for _ in range(len(query_meta_indices))]
         user_prompts: list[str] = ["" for _ in range(len(query_meta_indices))]
-        fallback_ids_list: list[list[Any]] = [
-            [] for _ in range(len(query_meta_indices))
-        ]
+        fallback_ids_list: list[list[Any]] = [[] for _ in range(len(query_meta_indices))]
 
         if prompt_workers and prompt_workers > 0:
             with ThreadPoolExecutor(max_workers=int(prompt_workers)) as ex:
                 futs = {
-                    ex.submit(_build_one_prompt, meta_i): pos
-                    for pos, meta_i in enumerate(query_meta_indices)
+                    ex.submit(_build_one_prompt, meta_i): pos for pos, meta_i in enumerate(query_meta_indices)
                 }
                 for fut in as_completed(futs):
                     pos = futs[fut]
@@ -961,11 +939,7 @@ class NextPOIEndToEndPipeline:
         # ------------------------------------------------------------
         # 4) Batched LLM decoding + parse
         # ------------------------------------------------------------
-        llm_texts = (
-            llm_batch_generate_fn(system_prompts, user_prompts)
-            if system_prompts
-            else []
-        )
+        llm_texts = llm_batch_generate_fn(system_prompts, user_prompts) if system_prompts else []
         if len(llm_texts) != len(system_prompts):
             raise RuntimeError(
                 f"llm_batch_generate_fn returned {len(llm_texts)} outputs for {len(system_prompts)} prompts."
@@ -975,9 +949,7 @@ class NextPOIEndToEndPipeline:
         llm_i = 0
         for meta in session_meta:
             if meta.get("skipped") or meta.get("error") is not None:
-                out_rows.append(
-                    {k: v for k, v in meta.items() if not k.startswith("_")}
-                )
+                out_rows.append({k: v for k, v in meta.items() if not k.startswith("_")})
                 continue
 
             llm_text = llm_texts[llm_i]
@@ -988,9 +960,7 @@ class NextPOIEndToEndPipeline:
                 selected = self.llm_parse_fn(llm_text, fallback_ids)
                 meta["selected_poi_id"] = selected
                 gold = meta.get("gold_next_poi_id", None)
-                meta["is_correct_at_1"] = (
-                    (selected == gold) if gold is not None else None
-                )
+                meta["is_correct_at_1"] = (selected == gold) if gold is not None else None
                 if include_details:
                     meta["llm_raw_text"] = llm_text
             except Exception as e:

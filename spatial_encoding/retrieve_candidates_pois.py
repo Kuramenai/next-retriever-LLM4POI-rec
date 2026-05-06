@@ -13,11 +13,11 @@ import numpy as np
 import pandas as pd
 from termcolor import cprint
 
-from spatial_encoding.retrieve_decisions_states import (
+from retrieve_decisions_states import (
     DecisionStateEncoder,
     DecisionStateRetrievalIndex,
+    retrieve_similar_decision_states,
 )
-from spatial_encoding.retrieve_decisions_states import retrieve_similar_decision_states
 
 
 def _softmax_weights(scores: np.ndarray, temperature: float = 1.0) -> np.ndarray:

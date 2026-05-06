@@ -62,10 +62,7 @@ def _haversine_from_one_to_many_m(
     dlat = lats2_rad - lat1_rad
     dlon = lons2_rad - lon1_rad
 
-    a = (
-        np.sin(dlat / 2.0) ** 2
-        + np.cos(lat1_rad) * np.cos(lats2_rad) * np.sin(dlon / 2.0) ** 2
-    )
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1_rad) * np.cos(lats2_rad) * np.sin(dlon / 2.0) ** 2
     c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
     return EARTH_RADIUS_M * c
 
@@ -80,9 +77,7 @@ def _bearing_from_one_to_many_deg(
     dlon = lons2_rad - lon1_rad
 
     y = np.sin(dlon) * np.cos(lats2_rad)
-    x = np.cos(lat1_rad) * np.sin(lats2_rad) - np.sin(lat1_rad) * np.cos(
-        lats2_rad
-    ) * np.cos(dlon)
+    x = np.cos(lat1_rad) * np.sin(lats2_rad) - np.sin(lat1_rad) * np.cos(lats2_rad) * np.cos(dlon)
     bearings = np.degrees(np.arctan2(y, x))
     return (bearings + 360.0) % 360.0
 
@@ -106,9 +101,7 @@ def _distance_bin_labels(edges_m: tuple[float, ...]) -> list[str]:
 def _bin_distances_m(distances_m: np.ndarray, edges_m: tuple[float, ...]) -> np.ndarray:
     bins = [0.0, *edges_m, np.inf]
     labels = _distance_bin_labels(edges_m)
-    return pd.cut(
-        distances_m, bins=bins, labels=labels, include_lowest=True, right=True
-    ).astype(object)
+    return pd.cut(distances_m, bins=bins, labels=labels, include_lowest=True, right=True).astype(object)
 
 
 def build_sparse_pair_transition_lookup(
@@ -125,7 +118,7 @@ def build_sparse_pair_transition_lookup(
     Build a sparse pairwise transition lookup over nearby POIs within a strict radius.
 
     """
-    cprint(f"Building pair transition lookup for {city} dtaset...", "yellow")
+    cprint("Building pair transition lookup...", "yellow")
     required_cols = [config.poi_id_col, config.lat_col, config.lon_col]
     if missing := [c for c in required_cols if c not in poi_df.columns]:
         raise ValueError(f"Missing required columns in poi_df: {missing}")
@@ -264,9 +257,7 @@ if __name__ == "__main__":
     with open(scrip_dir / f"geo_data/{city}_graph.pkl", "rb") as f:
         road_graph = pickle.load(f)
 
-    pair_df = build_sparse_pair_transition_lookup(
-        poi_df, road_graph, config, max_workers=32
-    )
+    pair_df = build_sparse_pair_transition_lookup(poi_df, road_graph, config, max_workers=32)
 
     cache_path = scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv"
 
