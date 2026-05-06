@@ -45,8 +45,8 @@ from tqdm import tqdm
 from sklearn.preprocessing import StandardScaler
 
 
-from spatial_encoding.extract_poi_spatial_descriptors import SpatialEncodingConfig
-from spatial_encoding.session_decision_state_table import build_current_decision_state
+from extract_poi_spatial_descriptors import SpatialEncodingConfig
+from session_decision_state_table import build_current_decision_state
 
 
 EARTH_RADIUS_M = 6_371_008.8
