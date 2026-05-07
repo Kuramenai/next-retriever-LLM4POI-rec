@@ -88,7 +88,7 @@ def evaluate_candidate_retriever(
     exclude_same_session: bool = True,
     prototype_union_k: int = 3,
     min_checkins: int = 2,
-    recent_k: int = 3,
+    recent_k: int | None = None,
     max_sessions: int | None = None,
     random_state: int = 42,
     show_progress: bool = True,
@@ -118,6 +118,18 @@ def evaluate_candidate_retriever(
 
     top_m_pois = max(k_values) if top_m_pois is None else int(top_m_pois)
     top_m_pois = max(top_m_pois, max(k_values))
+
+    encoder_recent_k = int(getattr(encoder, "recent_k", 2))
+    if recent_k is None:
+        recent_k = encoder_recent_k
+    else:
+        recent_k = int(recent_k)
+        if recent_k != encoder_recent_k:
+            raise ValueError(
+                f"recent_k={recent_k} does not match encoder.recent_k={encoder_recent_k}. "
+                "The query decision state must contain the same prev{lag}_* columns "
+                "that the encoder was fitted to transform."
+            )
 
     required_cols = [config.session_id_col, config.timestamp_col, config.poi_id_col]
     missing = [col for col in required_cols if col not in test_checkins_df.columns]
@@ -164,6 +176,7 @@ def evaluate_candidate_retriever(
                     "candidate_count": 0,
                     "retrieved_case_count": 0,
                     "top_candidates": [],
+                    "case_has_gt": False,
                 }
             )
             continue
@@ -229,6 +242,7 @@ def evaluate_candidate_retriever(
                 "candidate_count": 0,
                 "retrieved_case_count": 0,
                 "top_candidates": [],
+                "case_has_gt": False,
             }
             for k in k_values:
                 rec[f"hit@{k}"] = False
@@ -275,6 +289,11 @@ def evaluate_candidate_retriever(
         summary["mean_gold_rank"] = np.nan
         summary["coverage"] = np.nan
         summary[f"case_recall@{int(top_k_cases)}"] = np.nan
+        error_counts = details_df.loc[
+            (~details_df["skipped"].fillna(False)) & details_df["error"].notna(),
+            "error",
+        ].value_counts()
+        summary["top_error"] = error_counts.index[0] if not error_counts.empty else None
     else:
         ranks = pd.to_numeric(valid["gold_rank"], errors="coerce")
         for k in k_values:
@@ -311,7 +330,8 @@ if __name__ == "__main__":
 
     config = SpatialEncodingConfig()
 
-    encoder = DecisionStateEncoder(config=config)
+    recent_k = 3
+    encoder = DecisionStateEncoder(config=config, recent_k=recent_k)
     encoder.fit(decision_state_table_df)
     case_vectors = encoder.transform(decision_state_table_df)
     case_coords = encoder.extract_coords(decision_state_table_df)
@@ -349,7 +369,7 @@ if __name__ == "__main__":
         same_prototype_only=True,
         exclude_same_session=True,
         prototype_union_k=3,
-        recent_k=1,
+        recent_k=recent_k,
         min_checkins=3,
     )
 

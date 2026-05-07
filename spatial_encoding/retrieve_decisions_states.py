@@ -333,9 +333,9 @@ class DecisionStateEncoder:
             # return np.full(len(df), float(default), dtype=np.float32)
         arr = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=np.float32, copy=False)  # fmt: skip
         if np.isnan(arr).any():
-            cprint(f"\n[DEBUG] Found NaN in column {col}", "red")
+            # cprint(f"\n[DEBUG] Found NaN in column {col}", "red")
             arr = np.where(np.isnan(arr), float(default), arr).astype(np.float32, copy=False)  # fmt: skip
-            cprint(f"[DEBUG] Filled NaN with {default}", "green")
+            # cprint(f"[DEBUG] Filled NaN with {default}", "green")
         return arr
 
     def _l2_normalize_rows(self, mat: np.ndarray) -> np.ndarray:
