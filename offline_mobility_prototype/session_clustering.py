@@ -392,7 +392,7 @@ if __name__ == "__main__":
     cprint("Starting GMM prototypes fitting...", "yellow")
     cprint("Loading check-in data...", "yellow")
 
-    city = "tky"
+    city = "nyc"
     run_hdbscan_k_diagnostic = False
     scrip_dir = Path(__file__).resolve().parent.parent
     out_dir = scrip_dir / f"data/{city}"
@@ -455,7 +455,7 @@ if __name__ == "__main__":
         candidate_K=(8, 10, 12, 15, 20),
         candidate_covariance_types=("spherical", "diag", "tied"),
         reg_covar=1e-4,
-        top_m=3,
+        top_m=20,
     )
 
     cprint("GMM prototypes fitted successfully.", "green")

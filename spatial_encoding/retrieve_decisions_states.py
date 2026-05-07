@@ -426,6 +426,9 @@ class DecisionStateEncoder:
         Fit scalers on the training decision-state table.
         Must be called before transform/transform_single.
         """
+
+        cprint("Fitting encoder on decision state table...", "yellow")
+
         n = len(case_base_df)
         if n == 0:
             raise ValueError("Cannot fit encoder on empty case base.")
@@ -468,6 +471,9 @@ class DecisionStateEncoder:
         )
 
         self._fitted = True
+
+        cprint("Encoder fitted on decision state table successfullt", "green")
+
         return self
 
     # ------------------------------------------------------------------
@@ -502,22 +508,24 @@ class DecisionStateEncoder:
 
         return np.concatenate(blocks)
 
-    def transform_single(
-        self,
-        query_state: Union[pd.Series, pd.DataFrame, dict],
-    ) -> np.ndarray:
-        """Encode a single decision state into a 1-D non-spatial vector."""
-        if not self._fitted:
-            raise RuntimeError("Encoder not fitted. Call fit() first.")
+    def transform_single(self, row) -> np.ndarray:
+        """
+        Encode one decision state using the exact same code path as transform(...).
+        This avoids silent drift between online query encoding and batch case encoding.
+        """
 
-        if isinstance(query_state, pd.DataFrame):
-            if len(query_state) != 1:
-                raise ValueError("query_state DataFrame must contain exactly one row.")
-            query_state = query_state.iloc[0]
-        elif isinstance(query_state, dict):
-            query_state = pd.Series(query_state)
+        if isinstance(row, pd.Series):
+            df = row.to_frame().T
+        elif isinstance(row, dict):
+            df = pd.DataFrame([row])
+        elif isinstance(row, pd.DataFrame):
+            if len(row) != 1:
+                raise ValueError("transform_single expects exactly one row.")
+            df = row.copy()
+        else:
+            raise TypeError("transform_single expects a pandas Series, dict, or one-row DataFrame.")
 
-        return self._encode_row(query_state)
+        return self.transform(df)[0]
 
     def transform(self, case_base_df: pd.DataFrame) -> np.ndarray:
         """Encode all rows into an (N × D) non-spatial matrix."""
@@ -654,6 +662,8 @@ def build_retrieval_index(
             raise ValueError(f"case_coords must have shape (N,2); got {coords_arr.shape}.")  # fmt: skip
         # Precompute radians once to avoid per-query np.radians over large arrays
         coords_rad = np.radians(coords_arr.astype(np.float64)).astype(np.float32)
+
+    cprint("Retrieval index built successfully.", "green")
 
     return DecisionStateRetrievalIndex(
         case_base_df=case_base_df,
