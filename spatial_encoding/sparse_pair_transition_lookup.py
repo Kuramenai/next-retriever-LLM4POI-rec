@@ -262,3 +262,4 @@ if __name__ == "__main__":
     cache_path = scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv"
 
     pair_df.to_csv(cache_path)
+    poi_df.to_csv(scrip_dir / f"artifacts/{city}/{city}_poi.csv")

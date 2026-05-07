@@ -225,9 +225,9 @@ def compute_single_session_transitions(
     if np.any(needs_any):
         src_coords = coord_df.reindex(src_poi)
         dst_coords = coord_df.reindex(dst_poi)
-        if src_coords[[config.lat_col, config.lon_col]].isna().any(
-            axis=None
-        ) or dst_coords[[config.lat_col, config.lon_col]].isna().any(axis=None):
+        if src_coords[[config.lat_col, config.lon_col]].isna().any(axis=None) or dst_coords[
+            [config.lat_col, config.lon_col]
+        ].isna().any(axis=None):
             missing_src = src_coords[src_coords[[config.lat_col, config.lon_col]].isna().any(axis=1)].index.unique().tolist()  # fmt: skip
             missing_dst = dst_coords[dst_coords[[config.lat_col, config.lon_col]].isna().any(axis=1)].index.unique().tolist()  # fmt: skip
             raise KeyError(
@@ -310,16 +310,12 @@ def build_all_session_transition_descriptors(
 
     df = checkins_df.copy()
     df[config.timestamp_col] = pd.to_datetime(df[config.timestamp_col], errors="coerce")
-    df = df.sort_values(
-        [config.session_id_col, config.timestamp_col, config.poi_id_col]
-    ).reset_index(drop=True)
+    df = df.sort_values([config.session_id_col, config.timestamp_col, config.poi_id_col]).reset_index(
+        drop=True
+    )
 
     groups = df.groupby(config.session_id_col, sort=False)
-    iterator = (
-        tqdm(groups, desc="Computing transitions", unit="session")
-        if show_progress
-        else groups
-    )
+    iterator = tqdm(groups, desc="Computing transitions", unit="session") if show_progress else groups
 
     lookup_df = pd.DataFrame.from_dict(pair_lookup, orient="index")
     lookup_df.index = pd.MultiIndex.from_tuples(lookup_df.index, names=["src_POIId", "dst_POIId"])  # fmt: skip
@@ -363,15 +359,11 @@ if __name__ == "__main__":
     scrip_dir = Path(__file__).resolve().parent.parent
 
     cprint(f"\nLoading {city} raw checkins data...", "yellow")
-    checkins_df = pd.read_csv(scrip_dir / f"data/{city}/sample.csv")
-    poi_df = checkins_df[["PoiId", "Latitude", "Longitude"]]
-    poi_df = poi_df.drop_duplicates(subset="PoiId")
-    print("Number of checkins:", len(checkins_df))
-    print("Number of unique POIs:", len(poi_df))
+    checkins_df = pd.read_csv(scrip_dir / f"data/{city}/train_sample.csv")
+    checkins_df = checkins_df.rename(columns={"pseudo_session_trajectory_id": "SessionId"})
 
-    pair_lookup_df = pd.read_csv(
-        scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv"
-    )
+    poi_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi.csv")
+    pair_lookup_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv")
 
     pair_lookup = build_pair_lookup_dict(pair_lookup_df)
     poi_coord_map = build_poi_coord_map(poi_df, config)

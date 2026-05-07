@@ -86,8 +86,9 @@ def evaluate_candidate_retriever(
     temperature: float = 0.2,
     same_prototype_only: bool = True,
     exclude_same_session: bool = True,
-    prototype_union_k: int = 10,
+    prototype_union_k: int = 3,
     min_checkins: int = 2,
+    recent_k: int = 3,
     max_sessions: int | None = None,
     random_state: int = 42,
     show_progress: bool = True,
@@ -178,6 +179,7 @@ def evaluate_candidate_retriever(
                 lookup_df=lookup_df,
                 coord_df=coord_df,
                 config=config,
+                recent_k=recent_k,
             )
 
             result = retrieve_candidate_next_pois(
@@ -335,6 +337,10 @@ if __name__ == "__main__":
         temperature=0.2,
         max_sessions=None,
         show_progress=True,
+        same_prototype_only=True,
+        exclude_same_session=True,
+        prototype_union_k=3,
+        recent_k=1,
     )
 
     print("\nRetriever candidate metrics:")
