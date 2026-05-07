@@ -278,18 +278,13 @@ if __name__ == "__main__":
         h3_res_coarse=8, h3_res_fine=9, density_radius_m=100.0, timestamp_col="Time"
     )
 
-    city = "tky"
+    city = "nyc"
     scrip_dir = Path(__file__).resolve().parent.parent
-
-    cprint(f"\nLoading {city} raw checkins data...", "yellow")
-    checkins_df = pd.read_csv(scrip_dir / f"data/{city}/sample.csv")
-    poi_df = checkins_df[["PoiId", "Latitude", "Longitude"]]
-    poi_df = poi_df.drop_duplicates(subset="PoiId")
-    print("Number of checkins:", len(checkins_df))
-    print("Number of unique POIs:", len(poi_df))
 
     with open(scrip_dir / f"geo_data/{city}_graph.pkl", "rb") as f:
         road_graph = pickle.load(f)
+
+    poi_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi.csv")
 
     descriptor_df = build_poi_spatial_descriptors(poi_df, road_graph, config)
 

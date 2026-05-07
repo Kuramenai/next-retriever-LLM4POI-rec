@@ -355,7 +355,7 @@ def build_all_session_transition_descriptors(
 if __name__ == "__main__":
     config = SpatialEncodingConfig()
 
-    city = "tky"
+    city = "nyc"
     scrip_dir = Path(__file__).resolve().parent.parent
 
     cprint(f"\nLoading {city} raw checkins data...", "yellow")

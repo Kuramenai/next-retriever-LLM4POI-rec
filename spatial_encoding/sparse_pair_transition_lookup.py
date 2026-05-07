@@ -242,11 +242,11 @@ def build_sparse_pair_transition_lookup(
 if __name__ == "__main__":
     config = SpatialEncodingConfig()
 
-    city = "tky"
+    city = "nyc"
     scrip_dir = Path(__file__).resolve().parent.parent
 
     cprint(f"\nLoading {city} raw checkins data...", "yellow")
-    checkins_df = pd.read_csv(scrip_dir / f"data/{city}/sample.csv")
+    checkins_df = pd.read_csv(scrip_dir / f"data/{city}/train_sample.csv")
     poi_df = checkins_df[["PoiId", "Latitude", "Longitude"]]
     poi_df = poi_df.drop_duplicates(subset="PoiId")
     print("Number of checkins:", len(checkins_df))

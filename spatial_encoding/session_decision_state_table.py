@@ -432,13 +432,12 @@ def build_current_decision_state(
 
 if __name__ == "__main__":
     config = SpatialEncodingConfig()
-    city = "tky"
+    city = "nyc"
     scrip_dir = Path(__file__).resolve().parent.parent
 
     cprint(f"\nLoading {city} train checkins dataframe...", "yellow")
     train_checkins_df = pd.read_csv(scrip_dir / f"data/{city}/train_sample.csv")
     train_checkins_df = train_checkins_df.rename(columns={"pseudo_session_trajectory_id": "SessionId"})
-    print(train_checkins_df.columns)
 
     cprint(f"\nLoading {city} poi descriptor dataframe...", "yellow")
     poi_descriptor_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi_descriptor.csv")

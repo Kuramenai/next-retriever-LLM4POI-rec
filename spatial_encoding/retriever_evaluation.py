@@ -200,6 +200,10 @@ def evaluate_candidate_retriever(
             candidate_ids = candidate_pois["next_POIId"].tolist()
             rank = _rank_of_gold(candidate_ids, gold_poi_id)
 
+            # Case Recall #
+            case_has_gt = bool((retrieved_cases["next_POIId"] == gold_poi_id))
+            #######################
+
             rec = {
                 **base_row,
                 "gold_next_POIId": gold_poi_id,
@@ -207,6 +211,7 @@ def evaluate_candidate_retriever(
                 "candidate_count": int(len(candidate_pois)),
                 "retrieved_case_count": int(len(retrieved_cases)),
                 "top_candidates": candidate_ids[: max(k_values)],
+                "case_has_gt": case_has_gt,
             }
             for k in k_values:
                 rec[f"hit@{k}"] = bool(rank is not None and rank <= k)
@@ -267,6 +272,7 @@ def evaluate_candidate_retriever(
         summary["mrr"] = np.nan
         summary["mean_gold_rank"] = np.nan
         summary["coverage"] = np.nan
+        summary["case_recall@{k}"] = np.nan
     else:
         ranks = pd.to_numeric(valid["gold_rank"], errors="coerce")
         for k in k_values:
@@ -277,6 +283,7 @@ def evaluate_candidate_retriever(
         summary["coverage"] = float((valid["candidate_count"] > 0).mean())
         summary["mean_candidate_count"] = float(valid["candidate_count"].mean())
         summary["mean_retrieved_case_count"] = float(valid["retrieved_case_count"].mean())
+        summary["case_recall@{k}"] = float(valid["case_has_gt"].sum() / len(valid))
 
     metrics_df = pd.DataFrame([summary])
     return metrics_df, details_df
