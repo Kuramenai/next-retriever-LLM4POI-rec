@@ -612,6 +612,7 @@ def build_retrieval_index(
     """
     Build a retrieval index once at startup.
     """
+    cprint("Building retrieval index...", "yellow")
     if case_base_df is None or len(case_base_df) == 0:
         raise ValueError("case_base_df is empty; cannot build retrieval index.")
 
@@ -766,7 +767,6 @@ def retrieve_similar_decision_states(
                 cand_idx = np.unique(np.concatenate(buckets))
 
     if exclude_same_session and config.session_id_col in q.index:
-        cprint("Excluding same session...", "green")
         qsid = q[config.session_id_col]
         cand_idx = cand_idx[idx.session_ids[cand_idx] != qsid]
 

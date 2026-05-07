@@ -201,7 +201,9 @@ def evaluate_candidate_retriever(
             rank = _rank_of_gold(candidate_ids, gold_poi_id)
 
             # Case Recall #
-            case_has_gt = bool((retrieved_cases["next_POIId"] == gold_poi_id))
+
+            case_has_gt = bool((retrieved_cases["next_POIId"] == gold_poi_id).any())
+
             #######################
 
             rec = {
@@ -272,7 +274,7 @@ def evaluate_candidate_retriever(
         summary["mrr"] = np.nan
         summary["mean_gold_rank"] = np.nan
         summary["coverage"] = np.nan
-        summary["case_recall@{k}"] = np.nan
+        summary[f"case_recall@{int(top_k_cases)}"] = np.nan
     else:
         ranks = pd.to_numeric(valid["gold_rank"], errors="coerce")
         for k in k_values:
@@ -283,7 +285,7 @@ def evaluate_candidate_retriever(
         summary["coverage"] = float((valid["candidate_count"] > 0).mean())
         summary["mean_candidate_count"] = float(valid["candidate_count"].mean())
         summary["mean_retrieved_case_count"] = float(valid["retrieved_case_count"].mean())
-        summary["case_recall@{k}"] = float(valid["case_has_gt"].sum() / len(valid))
+        summary[f"case_recall@{int(top_k_cases)}"] = float(valid["case_has_gt"].mean())
 
     metrics_df = pd.DataFrame([summary])
     return metrics_df, details_df
@@ -348,6 +350,7 @@ if __name__ == "__main__":
         exclude_same_session=True,
         prototype_union_k=3,
         recent_k=1,
+        min_checkins=3,
     )
 
     print("\nRetriever candidate metrics:")
