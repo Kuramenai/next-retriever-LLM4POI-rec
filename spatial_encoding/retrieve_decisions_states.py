@@ -248,6 +248,39 @@ class DecisionStateEncoder:
         self._category_to_idx: dict[str, int] = {}
         self._dim: int = 0
 
+    def required_columns(self) -> list[str]:
+        cols = [
+            "current_timestamp",
+            self.density_col,
+            self.connectivity_col,
+            "prefix_elapsed_min",
+            "prefix_repeat_ratio",
+            "prefix_unique_poi_count",
+            "prefix_unique_category_count",
+            "current_category",
+            self.lat_col,
+            self.lon_col,
+        ]
+
+        for lag in range(1, self.recent_k + 1):
+            cols.extend(
+                [
+                    f"prev{lag}_distance_m",
+                    f"prev{lag}_gap_s",
+                    f"prev{lag}_bearing_deg",
+                ]
+            )
+
+        return cols
+
+    def validate_state_schema(self, df: pd.DataFrame, *, name: str = "state_df") -> None:
+        missing = [c for c in self.required_columns() if c not in df.columns]
+        if missing:
+            raise ValueError(
+                f"{name} is missing columns required by DecisionStateEncoder("
+                f"recent_k={self.recent_k}): {missing}"
+            )
+
     # ------------------------------------------------------------------
     # Feature extraction helpers
     # ------------------------------------------------------------------
@@ -429,6 +462,8 @@ class DecisionStateEncoder:
 
         cprint("Fitting encoder on decision state table...", "yellow")
 
+        self.validate_state_schema(case_base_df, name="case_base_df")
+
         n = len(case_base_df)
         if n == 0:
             raise ValueError("Cannot fit encoder on empty case base.")
@@ -529,6 +564,9 @@ class DecisionStateEncoder:
 
     def transform(self, case_base_df: pd.DataFrame) -> np.ndarray:
         """Encode all rows into an (N × D) non-spatial matrix."""
+
+        self.validate_state_schema(case_base_df, name="case_base_df")
+
         if not self._fitted:
             raise RuntimeError("Encoder not fitted. Call fit() first.")
         df = case_base_df

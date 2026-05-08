@@ -471,12 +471,14 @@ if __name__ == "__main__":
     else:
         cprint(f"GMM artifact not found at {gmm_path}", "red")
 
+    recent_k = 3
     decision_state_df = build_decision_state_table(
         checkins_df=train_checkins_df,
         poi_descriptor_df=poi_descriptor_df,
         session_transitions_df=session_transition_df,
         config=config,
         session_prototype_df=session_prototype_df,
+        recent_k=recent_k,
     )
 
     decision_state_df.to_csv(
