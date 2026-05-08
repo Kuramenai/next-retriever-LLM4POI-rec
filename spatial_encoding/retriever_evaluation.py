@@ -77,6 +77,7 @@ def evaluate_candidate_retriever(
     poi_descriptor_df: pd.DataFrame,
     lookup_df: pd.DataFrame,
     coord_df: pd.DataFrame,
+    prototype_assignments_df: pd.DataFrame | None = None,
     encoder: DecisionStateEncoder,
     retrieval_index: DecisionStateRetrievalIndex,
     config,
@@ -186,6 +187,25 @@ def evaluate_candidate_retriever(
         gold_poi_id = gold_next[config.poi_id_col]
 
         try:
+            prototype_signals = None
+            if prototype_assignments_df is not None:
+                sid_col = config.session_id_col
+                if sid_col in prototype_assignments_df.columns:
+                    proto_row = prototype_assignments_df.loc[prototype_assignments_df[sid_col] == session_id]
+                    if len(proto_row) > 0:
+                        prototype_signals = proto_row.iloc[0].to_dict()
+                    else:
+                        cprint(f"Prototype assignment is empty for session {session_id}", "yellow")
+                else:
+                    # allow passing pre-indexed assignment tables
+                    raise ValueError(f"session_id {session_id} not found in prototype_assignments_df")
+                    # try:
+                    #     proto_row = prototype_assignments_df.loc[session_id]
+                    #     if isinstance(proto_row, pd.Series):
+                    #         prototype_signals = proto_row.to_dict()
+                    # except Exception:
+                    #     prototype_signals = None
+
             query_state = build_current_decision_state(
                 partial_session_df=prefix_df,
                 poi_descriptor_df=poi_descriptor_df,
@@ -193,6 +213,7 @@ def evaluate_candidate_retriever(
                 coord_df=coord_df,
                 config=config,
                 recent_k=recent_k,
+                prototype_signals=prototype_signals,
             )
 
             result = retrieve_candidate_next_pois(
@@ -343,6 +364,19 @@ if __name__ == "__main__":
         case_coords=case_coords,
     )
 
+    # Optional: leakage-free prototype assignments for TEST prefixes
+    proto_assignments = None
+    gmm_path = scrip_dir / f"artifacts/{city}/{city}_gmm_cluster.pkl"
+    if gmm_path.exists():
+        try:
+            with gmm_path.open("rb") as f:
+                gmm_data = pickle.load(f)
+            proto_assignments = None if gmm_data.get("test") is None else gmm_data["test"].get("assignments")
+            if proto_assignments is not None:
+                cprint(f"Loaded test prototype assignments from {gmm_path}", "green")
+        except Exception as e:
+            cprint(f"Failed to load prototype assignments from {gmm_path}: {e!r}", "yellow")
+
     sid_col = config.session_id_col
     ts_col = config.timestamp_col
     poi_id_col = config.poi_id_col
@@ -357,6 +391,7 @@ if __name__ == "__main__":
         poi_descriptor_df=poi_descriptor_df,
         lookup_df=lookup_df,
         coord_df=coord_df,
+        prototype_assignments_df=proto_assignments,
         encoder=encoder,
         retrieval_index=retrieval_index,
         config=config,

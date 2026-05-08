@@ -20,6 +20,27 @@ except Exception:
 pd.set_option("future.no_silent_downcasting", True)
 
 
+def _drop_last_checkin_per_session(
+    checkins_df: pd.DataFrame,
+    *,
+    session_id_col: str = "SessionId",
+    time_col: str = "CheckinTime",
+    poi_id_col: str = "PoiId",
+) -> pd.DataFrame:
+    """
+    Build a prefix-only check-in table by removing the last check-in of each session.
+    """
+    if len(checkins_df) == 0:
+        return checkins_df.copy()
+    df = checkins_df.copy()
+    df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+    df = df.loc[df[time_col].notna()].copy()
+    df = df.sort_values([session_id_col, time_col, poi_id_col]).reset_index(drop=True)
+    # keep all rows except the per-session tail(1)
+    keep_mask = ~df.index.isin(df.groupby(session_id_col, sort=False).tail(1).index)
+    return df.loc[keep_mask].reset_index(drop=True)
+
+
 def suggest_k_hdbscan(
     X: np.ndarray,
     *,
@@ -415,10 +436,25 @@ if __name__ == "__main__":
     cprint("Check-in data loaded successfully.", "green")
 
     cprint("Building feature blocks...", "yellow")
+
+    test_checkins_prefix = _drop_last_checkin_per_session(
+        test_checkins,
+        session_id_col="SessionId",
+        time_col="CheckinTime",
+        poi_id_col="PoiId",
+    )
+
+    val_checkins_prefix = _drop_last_checkin_per_session(
+        val_checkins,
+        session_id_col="SessionId",
+        time_col="CheckinTime",
+        poi_id_col="PoiId",
+    )
+
     feature_data = build_feature_blocks(
         train_checkins=train_checkins,
-        val_checkins=val_checkins,
-        test_checkins=test_checkins,
+        val_checkins=val_checkins_prefix,
+        test_checkins=test_checkins_prefix,
         taxonomy_level="raw",
         absorb_transit=False,
         absorb_neutral=False,
@@ -455,7 +491,7 @@ if __name__ == "__main__":
         candidate_K=(8, 10, 12, 15, 20),
         candidate_covariance_types=("spherical", "diag", "tied"),
         reg_covar=1e-4,
-        top_m=20,
+        top_m=10,
     )
 
     cprint("GMM prototypes fitted successfully.", "green")
