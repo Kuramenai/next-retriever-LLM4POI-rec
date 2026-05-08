@@ -210,7 +210,7 @@ def prototype_pool_next_poi_recall(
 
 
 if __name__ == "__main__":
-    city = "tky"
+    city = "nyc"
     scrip_dir = Path(__file__).resolve().parent.parent
 
     train_checkins = pd.read_csv(scrip_dir / f"data/{city}/train_sample.csv")

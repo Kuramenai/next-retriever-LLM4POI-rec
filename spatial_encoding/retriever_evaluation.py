@@ -330,7 +330,7 @@ if __name__ == "__main__":
 
     config = SpatialEncodingConfig()
 
-    recent_k = 3
+    recent_k = 4
     encoder = DecisionStateEncoder(config=config, recent_k=recent_k)
     encoder.fit(decision_state_table_df)
     case_vectors = encoder.transform(decision_state_table_df)

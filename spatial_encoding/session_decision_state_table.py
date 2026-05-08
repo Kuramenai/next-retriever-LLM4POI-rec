@@ -471,7 +471,7 @@ if __name__ == "__main__":
     else:
         cprint(f"GMM artifact not found at {gmm_path}", "red")
 
-    recent_k = 3
+    recent_k = 5
     decision_state_df = build_decision_state_table(
         checkins_df=train_checkins_df,
         poi_descriptor_df=poi_descriptor_df,
