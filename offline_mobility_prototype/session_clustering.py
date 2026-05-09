@@ -488,8 +488,8 @@ if __name__ == "__main__":
         val_meta=feature_data["val"]["meta"],
         X_test=feature_data["test"]["X"],
         test_meta=feature_data["test"]["meta"],
-        candidate_K=(8, 10, 12, 15, 20),
-        candidate_covariance_types=("spherical", "diag", "tied"),
+        candidate_K=(15, 20, 25, 30, 35, 40, 45, 50),
+        candidate_covariance_types=("diag",),
         reg_covar=1e-4,
         top_m=10,
     )

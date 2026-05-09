@@ -364,7 +364,6 @@ if __name__ == "__main__":
         case_coords=case_coords,
     )
 
-    # Optional: leakage-free prototype assignments for TEST prefixes
     proto_assignments = None
     gmm_path = scrip_dir / f"artifacts/{city}/{city}_gmm_cluster.pkl"
     if gmm_path.exists():
@@ -401,7 +400,7 @@ if __name__ == "__main__":
         temperature=0.2,
         max_sessions=None,
         show_progress=True,
-        same_prototype_only=True,
+        same_prototype_only=False,
         exclude_same_session=True,
         prototype_union_k=3,
         recent_k=recent_k,
