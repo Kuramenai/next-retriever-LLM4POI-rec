@@ -24,7 +24,7 @@ from spatial_encoding.session_decision_state_table import build_current_decision
 from spatial_encoding.retrieve_decisions_states import (
     retrieve_similar_decision_states,
     _haversine_one_to_many_m_from_radians,
-)  # fmt: skipz
+)  # fmt: skip
 from spatial_encoding.retrieve_candidates_pois import (
     aggregate_candidate_pois_from_retrieved_cases,
 )

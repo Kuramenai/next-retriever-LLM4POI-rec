@@ -257,7 +257,8 @@ if __name__ == "__main__":
     with open(scrip_dir / f"geo_data/{city}_graph.pkl", "rb") as f:
         road_graph = pickle.load(f)
 
-    pair_df = build_sparse_pair_transition_lookup(poi_df, road_graph, config, max_workers=32)
+    max_workers = 4
+    pair_df = build_sparse_pair_transition_lookup(poi_df, road_graph, config, max_workers=max_workers)
 
     cache_path = scrip_dir / f"artifacts/{city}/{city}_poi_pair_lookup_table.csv"
 
