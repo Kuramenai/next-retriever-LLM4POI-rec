@@ -58,15 +58,13 @@ from retrieve_candidates_pois import build_candidate_next_pois
 from extract_poi_spatial_descriptors import SpatialEncodingConfig
 from retrieve_decisions_states import build_retrieval_index
 from session_decision_state_table import build_current_decision_state
+from llm_reranker import build_reranking_prompt
 
 try:
     import lightgbm as lgb
 except ImportError:
     raise ImportError("lightgbm not installed. pip install lightgbm")
 
-import warnings
-
-warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Feature names (consistent ordering)
@@ -347,6 +345,19 @@ def _candidate_distances_m(
     return out
 
 
+def _rank_score(values, *, higher_is_better: bool = True) -> np.ndarray:
+    """Return per-query rank score where 1.0 is best and 0.0 is worst."""
+    arr = pd.to_numeric(pd.Series(values), errors="coerce")
+    fill_value = -np.inf if higher_is_better else np.inf
+    arr = arr.fillna(fill_value)
+    ascending = not higher_is_better
+    ranks = arr.rank(method="average", ascending=ascending).to_numpy(dtype=np.float32)
+    n = len(ranks)
+    if n <= 1:
+        return np.ones(n, dtype=np.float32)
+    return (1.0 - ((ranks - 1.0) / float(n - 1))).astype(np.float32)
+
+
 def extract_candidate_features(
     candidate_poi_ids: list[int],
     query_state: Union[pd.Series, pd.DataFrame],
@@ -413,6 +424,17 @@ def extract_candidate_features(
     cand_categories = [cat_map.get(poi_id, "") for poi_id in candidate_poi_ids]
     distances = _candidate_distances_m(candidate_poi_ids, query_lat, query_lon, idx.next_poi_locations)
 
+    st_transition_weight_vals = [
+        st_candidates.get(poi_id, {}).get("transition_weight", 0.0) for poi_id in candidate_poi_ids
+    ]
+    st_context_score_max_vals = [
+        context_scores.get(poi_id, {}).get("max", 0.0) for poi_id in candidate_poi_ids
+    ]
+    ds_candidate_prob_vals = [ds_candidate_prob.get(poi_id, 0.0) for poi_id in candidate_poi_ids]
+    st_from_exact_vals = [
+        float(st_candidates.get(poi_id, {}).get("from_exact_poi", False)) for poi_id in candidate_poi_ids
+    ]
+
     data = {
         "next_POIId": candidate_poi_ids,
         "next_category": cand_categories,
@@ -420,21 +442,15 @@ def extract_candidate_features(
         "st_transition_count": [
             st_candidates.get(poi_id, {}).get("transition_count", 0) for poi_id in candidate_poi_ids
         ],
-        "st_transition_weight": [
-            st_candidates.get(poi_id, {}).get("transition_weight", 0.0) for poi_id in candidate_poi_ids
-        ],
-        "st_from_exact_poi": [
-            float(st_candidates.get(poi_id, {}).get("from_exact_poi", False)) for poi_id in candidate_poi_ids
-        ],
+        "st_transition_weight": st_transition_weight_vals,
+        "st_from_exact_poi": st_from_exact_vals,
         "st_n_source_pois": [
             len(st_candidates.get(poi_id, {}).get("source_pois", set())) for poi_id in candidate_poi_ids
         ],
         "st_best_source_weight": [
             st_candidates.get(poi_id, {}).get("best_source_weight", 0.0) for poi_id in candidate_poi_ids
         ],
-        "st_context_score_max": [
-            context_scores.get(poi_id, {}).get("max", 0.0) for poi_id in candidate_poi_ids
-        ],
+        "st_context_score_max": st_context_score_max_vals,
         "st_context_score_mean": [
             context_scores.get(poi_id, {}).get("mean", 0.0) for poi_id in candidate_poi_ids
         ],
@@ -443,7 +459,7 @@ def extract_candidate_features(
         ],
         "ds_in_candidates": [float(poi_id in ds_rank) for poi_id in candidate_poi_ids],
         "ds_rank": [float(ds_rank.get(poi_id, 999)) for poi_id in candidate_poi_ids],
-        "ds_candidate_prob": [ds_candidate_prob.get(poi_id, 0.0) for poi_id in candidate_poi_ids],
+        "ds_candidate_prob": ds_candidate_prob_vals,
         "ds_max_case_score": [ds_max_case_score.get(poi_id, 0.0) for poi_id in candidate_poi_ids],
         "ds_mean_case_score": [ds_mean_case_score.get(poi_id, 0.0) for poi_id in candidate_poi_ids],
         "ds_support_case_count": [ds_support_case_count.get(poi_id, 0) for poi_id in candidate_poi_ids],
@@ -460,6 +476,11 @@ def extract_candidate_features(
         "in_both_pools": [
             float((poi_id in st_candidates) and (poi_id in ds_rank)) for poi_id in candidate_poi_ids
         ],
+        "rank_st_transition_weight": _rank_score(st_transition_weight_vals, higher_is_better=True),
+        "rank_st_context_score_max": _rank_score(st_context_score_max_vals, higher_is_better=True),
+        "rank_distance_to_candidate_m": _rank_score(distances, higher_is_better=False),
+        "rank_ds_candidate_prob": _rank_score(ds_candidate_prob_vals, higher_is_better=True),
+        "rank_st_from_exact_poi": _rank_score(st_from_exact_vals, higher_is_better=True),
     }
 
     return pd.DataFrame(data)
@@ -633,7 +654,7 @@ def _process_reranker_query_chunk(query_records: list[dict[str, Any]]) -> dict[s
                 ds_top_m_pois=ctx["ds_top_m_pois"],
                 ds_temperature=ctx["temperature"],
                 recent_k=ctx["recent_k"],
-                exclude_same_session=True,
+                exclude_same_session=ctx["exclude_same_session"],
             )
 
             if len(features_df) == 0:
@@ -968,7 +989,7 @@ class TrainedReranker:
     """Wrapper for a trained reranker model + fitted scaler."""
 
     model: Any
-    scaler: StandardScaler
+    scaler: Optional[StandardScaler]
     feature_names: list[str]
     model_type: str
 
@@ -978,6 +999,8 @@ def train_reranker(
     y: np.ndarray,
     *,
     model_type: str = "logistic",
+    meta: Optional[pd.DataFrame] = None,
+    query_balanced_weights: bool = False,
     random_state: int = 42,
 ) -> TrainedReranker:
     """
@@ -994,6 +1017,25 @@ def train_reranker(
     if np.unique(y).size < 2:
         raise ValueError("Reranker training labels must contain both positive and negative examples.")
 
+    # sample_weight = None
+    # if query_balanced_weights:
+    #     if meta is None or "query_id" not in meta.columns:
+    #         raise ValueError("query_balanced_weights=True requires meta with a 'query_id' column.")
+    #     group_sizes = meta.groupby("query_id", sort=False)["query_id"].transform("size").to_numpy(dtype=float)
+    #     sample_weight = 1.0 / np.maximum(group_sizes, 1.0)
+    #     sample_weight = sample_weight * (len(sample_weight) / sample_weight.sum())
+
+    # Per-query balanced weights
+    sample_weight = np.ones(len(y), dtype=np.float32)
+    for qid in meta["query_id"].unique():
+        mask = (meta["query_id"] == qid).to_numpy()
+        pos_mask = mask & (y == 1)
+        neg_mask = mask & (y == 0)
+        n_neg = neg_mask.sum()
+        if n_neg > 0:
+            sample_weight[pos_mask] = 0.5
+            sample_weight[neg_mask] = 0.5 / n_neg
+
     if model_type == "logistic":
         # Class imbalance: gold POI is ~1 out of ~250 candidates
         model = LogisticRegression(
@@ -1002,7 +1044,7 @@ def train_reranker(
             C=1.0,
             random_state=random_state,
         )
-        model.fit(X_scaled, y)
+        model.fit(X_scaled, y, sample_weight=sample_weight)
 
         # Print learned weights for interpretability
         cprint("\nLogistic regression coefficients:", "cyan")
@@ -1027,7 +1069,7 @@ def train_reranker(
             random_state=random_state,
             verbose=-1,
         )
-        model.fit(X_scaled, y)
+        model.fit(X_scaled, y, sample_weight=sample_weight)
 
         cprint("\nLightGBM feature importances:", "cyan")
         for name, imp in sorted(
@@ -1044,6 +1086,39 @@ def train_reranker(
         scaler=scaler,
         feature_names=list(RERANKER_FEATURE_NAMES),
         model_type=model_type,
+    )
+
+
+def train_lgbm_ranker(
+    X: np.ndarray,
+    y: np.ndarray,
+    meta: pd.DataFrame,
+    *,
+    random_state: int = 42,
+) -> TrainedReranker:
+    """Train a LightGBM LambdaRank model with query groups from meta['query_id']."""
+    if "query_id" not in meta.columns:
+        raise ValueError("meta must contain a 'query_id' column for LGBMRanker training.")
+    groups = meta.groupby("query_id", sort=False).size().to_numpy()
+    if int(groups.sum()) != len(X):
+        raise ValueError("LGBMRanker group sizes do not sum to the number of training rows.")
+
+    model = lgb.LGBMRanker(
+        objective="lambdarank",
+        metric="ndcg",
+        n_estimators=300,
+        max_depth=6,
+        learning_rate=0.01,
+        subsample=0.8,
+        random_state=random_state,
+        verbose=-1,
+    )
+    model.fit(np.nan_to_num(X, nan=0.0), y, group=groups, eval_at=[1, 5, 20])
+    return TrainedReranker(
+        model=model,
+        scaler=None,
+        feature_names=list(RERANKER_FEATURE_NAMES),
+        model_type="lgbm_ranker",
     )
 
 
@@ -1066,12 +1141,22 @@ def rerank_candidates(
     if len(features_df) == 0:
         return features_df
 
-    X = features_df[reranker.feature_names].to_numpy(dtype=np.float32)
-    X = np.nan_to_num(X, nan=0.0)
-    X_scaled = reranker.scaler.transform(X)
+    missing = [name for name in reranker.feature_names if name not in features_df.columns]
+    if missing:
+        raise ValueError(f"features_df missing reranker feature columns: {missing}")
 
-    # proba = reranker.model.predict_proba(X_scaled)[:, 1]
-    scores = reranker.model.predict(X_scaled)
+    X_df = features_df[reranker.feature_names].copy()
+    X_df = X_df.replace([np.inf, -np.inf], 0).fillna(0)
+
+    if reranker.scaler is None:
+        X_model = X_df
+    else:
+        X_model = reranker.scaler.transform(X_df.to_numpy(dtype=np.float32))
+
+    if reranker.model_type in {"logistic", "lgbm"} and hasattr(reranker.model, "predict_proba"):
+        scores = reranker.model.predict_proba(X_model)[:, 1]
+    else:
+        scores = reranker.model.predict(X_model)
 
     result = features_df.copy()
     result["reranker_score"] = scores
@@ -1199,6 +1284,7 @@ def evaluate_union_reranker(
     iterator = tqdm(groups, desc="evaluate union reranker", unit="session") if show_progress else groups
 
     rows = []
+    prompts = []
     for session_id, session_df in iterator:
         session_df = session_df.sort_values([config.timestamp_col, config.poi_id_col]).reset_index(drop=True)
 
@@ -1217,6 +1303,7 @@ def evaluate_union_reranker(
         gold_poi_id = session_df.iloc[-1][config.poi_id_col]
 
         try:
+            prompt = build_reranking_prompt
             query_state = build_current_decision_state(
                 partial_session_df=prefix_df,
                 poi_descriptor_df=poi_descriptor_df,
@@ -1244,6 +1331,19 @@ def evaluate_union_reranker(
             candidate_pois = result["candidate_pois"]
             candidate_ids = candidate_pois["next_POIId"].tolist() if len(candidate_pois) > 0 else []
             generated_ids = result.get("generated_candidate_ids", [])
+            top_scores = (
+                candidate_pois["reranker_score"].head(5).tolist()
+                if len(candidate_pois) > 0 and "reranker_score" in candidate_pois.columns
+                else []
+            )
+
+            prompt = build_reranking_prompt(
+                prefix_checkins_df=prefix_df,
+                candidate_df=candidate_pois,
+                poi_descriptor_df=poi_descriptor_df,
+                config=config,
+            )
+            prompts.append(prompt)
 
             # Rank of gold
             rank = None
@@ -1263,6 +1363,7 @@ def evaluate_union_reranker(
                 "n_candidates_generated": result["n_candidates_generated"],
                 "generated_pool_hit": pool_hit,
                 "generated_pool_size": len(generated_ids),
+                "top_reranker_scores": top_scores,
             }
             for k in k_values:
                 rec[f"hit@{k}"] = bool(rank is not None and rank <= k)
@@ -1270,7 +1371,16 @@ def evaluate_union_reranker(
             rows.append(rec)
 
         except Exception as e:
-            rec = {**base_row, "error": repr(e), "gold_next_POIId": gold_poi_id, "gold_rank": None}
+            rec = {
+                **base_row,
+                "error": repr(e),
+                "gold_next_POIId": gold_poi_id,
+                "gold_rank": None,
+                "candidate_count": 0,
+                "n_candidates_generated": 0,
+                "generated_pool_hit": False,
+                "generated_pool_size": 0,
+            }
             for k in k_values:
                 rec[f"hit@{k}"] = False
                 rec[f"recall@{k}"] = 0.0
@@ -1316,7 +1426,7 @@ def evaluate_union_reranker(
         ].value_counts()
         summary["top_error"] = error_counts.index[0] if not error_counts.empty else None
 
-    return pd.DataFrame([summary]), details_df
+    return prompts, pd.DataFrame([summary]), details_df
 
 
 if __name__ == "__main__":
@@ -1380,6 +1490,8 @@ if __name__ == "__main__":
     # and creates (features, label) pairs.
     # Use max_samples for faster iteration during development.
 
+    nearby_radius = 2000
+    source_tau = 300
     X_train, y_train, meta_train = build_reranker_training_data(
         decision_state_table_df=decision_state_table_df,
         train_checkins_df=train_checkins,
@@ -1390,15 +1502,15 @@ if __name__ == "__main__":
         retrieval_index=retrieval_index,
         encoder=encoder,
         config=config,
-        nearby_radius_m=2000.0,
-        source_tau_m=300.0,
+        nearby_radius_m=nearby_radius,
+        source_tau_m=source_tau,
         recent_k=recent_k,
         query_state_source="decision_state",
         max_queries_per_session=None,
-        max_samples=3000,  # start small, increase later
+        max_samples=None,  # start small, increase later
         train_on_pool_hits_only=True,
-        max_workers=32,  # set to 4-8 on Linux for the full training-data build
-        # mp_start_method="fork",
+        max_workers=16,  # set to 4-8 on Linux for the full training-data build
+        mp_start_method="fork",
     )
 
     with open(scrip_dir / f"artifacts/{city}/{city}_x_train.pkl", "wb") as f:
@@ -1412,23 +1524,17 @@ if __name__ == "__main__":
     # Start with logistic regression (interpretable, fast)
     # reranker = train_reranker(X_train, y_train, model_type="logistic")
 
-    # Then try LightGBM (better at non-linear interactions):
-    groups_train = meta_train.groupby("query_id", sort=False).size().to_numpy()
-    assert groups_train.sum() == len(X_train), "Group sizes don't sum to total rows"
+    # Then try LightGBM ranker (better aligned with per-query ordering):
+    # reranker = train_lgbm_ranker(X_train, y_train, meta_train, random_state=42)
 
-    reranker = lgb.LGBMRanker(
-        objective="lambdarank",
-        metric="ndcg",
-        eval_at=[1, 5, 20],
-        n_estimators=300,
-        max_depth=6,
-        learning_rate=0.05,
-        subsample=0.8,
-        random_state=42,
-        verbose=-1,
+    # Query-balanced logistic baseline:
+    reranker = train_reranker(
+        X_train,
+        y_train,
+        model_type="logistic",
+        meta=meta_train,
+        query_balanced_weights=True,
     )
-    reranker.fit(X_train, y_train, group=groups_train)
-    reranker = train_reranker(X_train, y_train, model_type="lgbm")
 
     # ── Step 3: Evaluate ────────────────────────────────────────────
     metrics, details = evaluate_union_reranker(
@@ -1441,8 +1547,8 @@ if __name__ == "__main__":
         encoder=encoder,
         reranker=reranker,
         config=config,
-        nearby_radius_m=2000.0,
-        source_tau_m=300.0,
+        nearby_radius_m=nearby_radius,
+        source_tau_m=source_tau,
         recent_k=recent_k,
         min_checkins=3,
     )
