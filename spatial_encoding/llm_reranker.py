@@ -338,7 +338,7 @@ def format_candidates_for_llm(
         # We can compute from distance_m if lat/lon are available in the transition index
         # For now just use distance
 
-        line = f"  {idx}. [ID: {poi_id}] {category} — {dist_str}"
+        line = f"{idx}. [ID: {poi_id}] {category} — {dist_str}"
         lines.append(line)
 
     text = "Candidate next POIs:\n" + "\n".join(lines)

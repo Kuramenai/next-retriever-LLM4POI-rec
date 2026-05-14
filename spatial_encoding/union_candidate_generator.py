@@ -1017,24 +1017,24 @@ def train_reranker(
     if np.unique(y).size < 2:
         raise ValueError("Reranker training labels must contain both positive and negative examples.")
 
-    # sample_weight = None
-    # if query_balanced_weights:
-    #     if meta is None or "query_id" not in meta.columns:
-    #         raise ValueError("query_balanced_weights=True requires meta with a 'query_id' column.")
-    #     group_sizes = meta.groupby("query_id", sort=False)["query_id"].transform("size").to_numpy(dtype=float)
-    #     sample_weight = 1.0 / np.maximum(group_sizes, 1.0)
-    #     sample_weight = sample_weight * (len(sample_weight) / sample_weight.sum())
+    sample_weight = None
+    if query_balanced_weights:
+        if meta is None or "query_id" not in meta.columns:
+            raise ValueError("query_balanced_weights=True requires meta with a 'query_id' column.")
+        group_sizes = meta.groupby("query_id", sort=False)["query_id"].transform("size").to_numpy(dtype=float)
+        sample_weight = 1.0 / np.maximum(group_sizes, 1.0)
+        sample_weight = sample_weight * (len(sample_weight) / sample_weight.sum())
 
     # Per-query balanced weights
-    sample_weight = np.ones(len(y), dtype=np.float32)
-    for qid in meta["query_id"].unique():
-        mask = (meta["query_id"] == qid).to_numpy()
-        pos_mask = mask & (y == 1)
-        neg_mask = mask & (y == 0)
-        n_neg = neg_mask.sum()
-        if n_neg > 0:
-            sample_weight[pos_mask] = 0.5
-            sample_weight[neg_mask] = 0.5 / n_neg
+    # sample_weight = np.ones(len(y), dtype=np.float32)
+    # for qid in meta["query_id"].unique():
+    #     mask = (meta["query_id"] == qid).to_numpy()
+    #     pos_mask = mask & (y == 1)
+    #     neg_mask = mask & (y == 0)
+    #     n_neg = neg_mask.sum()
+    #     if n_neg > 0:
+    #         sample_weight[pos_mask] = 0.5
+    #         sample_weight[neg_mask] = 0.5 / n_neg
 
     if model_type == "logistic":
         # Class imbalance: gold POI is ~1 out of ~250 candidates
@@ -1244,7 +1244,7 @@ def evaluate_union_reranker(
     max_sessions: Optional[int] = None,
     random_state: int = 42,
     show_progress: bool = True,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[list[dict], pd.DataFrame, pd.DataFrame]:
     """Evaluate the union + learned reranker pipeline."""
 
     def _normalize(v):
@@ -1285,6 +1285,7 @@ def evaluate_union_reranker(
 
     rows = []
     prompts = []
+    gold_next_POIIds = []
     for session_id, session_df in iterator:
         session_df = session_df.sort_values([config.timestamp_col, config.poi_id_col]).reset_index(drop=True)
 
@@ -1303,7 +1304,6 @@ def evaluate_union_reranker(
         gold_poi_id = session_df.iloc[-1][config.poi_id_col]
 
         try:
-            prompt = build_reranking_prompt
             query_state = build_current_decision_state(
                 partial_session_df=prefix_df,
                 poi_descriptor_df=poi_descriptor_df,
@@ -1342,8 +1342,10 @@ def evaluate_union_reranker(
                 candidate_df=candidate_pois,
                 poi_descriptor_df=poi_descriptor_df,
                 config=config,
+                recent_k=recent_k,
             )
             prompts.append(prompt)
+            gold_next_POIIds.append(gold_poi_id)
 
             # Rank of gold
             rank = None
@@ -1426,7 +1428,7 @@ def evaluate_union_reranker(
         ].value_counts()
         summary["top_error"] = error_counts.index[0] if not error_counts.empty else None
 
-    return prompts, pd.DataFrame([summary]), details_df
+    return prompts, gold_next_POIIds, pd.DataFrame([summary]), details_df
 
 
 if __name__ == "__main__":
@@ -1492,33 +1494,46 @@ if __name__ == "__main__":
 
     nearby_radius = 2000
     source_tau = 300
-    X_train, y_train, meta_train = build_reranker_training_data(
-        decision_state_table_df=decision_state_table_df,
-        train_checkins_df=train_checkins,
-        poi_descriptor_df=poi_descriptor_df,
-        lookup_df=lookup_df,
-        coord_df=coord_df,
-        transition_index=transition_index,
-        retrieval_index=retrieval_index,
-        encoder=encoder,
-        config=config,
-        nearby_radius_m=nearby_radius,
-        source_tau_m=source_tau,
-        recent_k=recent_k,
-        query_state_source="decision_state",
-        max_queries_per_session=None,
-        max_samples=None,  # start small, increase later
-        train_on_pool_hits_only=True,
-        max_workers=16,  # set to 4-8 on Linux for the full training-data build
-        mp_start_method="fork",
-    )
 
-    with open(scrip_dir / f"artifacts/{city}/{city}_x_train.pkl", "wb") as f:
-        pickle.dump(X_train, f)
-    with open(scrip_dir / f"artifacts/{city}/{city}_y_train.pkl", "wb") as f:
-        pickle.dump(y_train, f)
-    with open(scrip_dir / f"artifacts/{city}/{city}_meta_train.pkl", "wb") as f:
-        pickle.dump(meta_train, f)
+    x_train_path = scrip_dir / f"artifacts/{city}/{city}_x_train.pkl"
+    y_train_path = scrip_dir / f"artifacts/{city}/{city}_y_train.pkl"
+    meta_train_path = scrip_dir / f"artifacts/{city}/{city}_meta_train.pkl"
+
+    if x_train_path.exists() and y_train_path.exists() and meta_train_path.exists():
+        with open(x_train_path, "rb") as f:
+            X_train = pickle.load(f)
+        with open(y_train_path, "rb") as f:
+            y_train = pickle.load(f)
+        with open(meta_train_path, "rb") as f:
+            meta_train = pickle.load(f)
+    else:
+        X_train, y_train, meta_train = build_reranker_training_data(
+            decision_state_table_df=decision_state_table_df,
+            train_checkins_df=train_checkins,
+            poi_descriptor_df=poi_descriptor_df,
+            lookup_df=lookup_df,
+            coord_df=coord_df,
+            transition_index=transition_index,
+            retrieval_index=retrieval_index,
+            encoder=encoder,
+            config=config,
+            nearby_radius_m=nearby_radius,
+            source_tau_m=source_tau,
+            recent_k=recent_k,
+            query_state_source="decision_state",
+            max_queries_per_session=None,
+            max_samples=None,  # start small, increase later
+            train_on_pool_hits_only=True,
+            max_workers=16,  # set to 4-8 on Linux for the full training-data build
+            mp_start_method="fork",
+        )
+
+        with open(scrip_dir / f"artifacts/{city}/{city}_x_train.pkl", "wb") as f:
+            pickle.dump(X_train, f)
+        with open(scrip_dir / f"artifacts/{city}/{city}_y_train.pkl", "wb") as f:
+            pickle.dump(y_train, f)
+        with open(scrip_dir / f"artifacts/{city}/{city}_meta_train.pkl", "wb") as f:
+            pickle.dump(meta_train, f)
 
     # ── Step 2: Train the reranker ──────────────────────────────────
     # Start with logistic regression (interpretable, fast)
@@ -1537,7 +1552,7 @@ if __name__ == "__main__":
     )
 
     # ── Step 3: Evaluate ────────────────────────────────────────────
-    metrics, details = evaluate_union_reranker(
+    prompts, gold_next_POIIds, metrics, details = evaluate_union_reranker(
         test_checkins_df=test_checkins,
         poi_descriptor_df=poi_descriptor_df,
         lookup_df=lookup_df,
@@ -1557,9 +1572,19 @@ if __name__ == "__main__":
     print(metrics.to_string(index=False))
 
     out_dir = scrip_dir / f"artifacts/{city}"
+    prompts_path = out_dir / f"{city}_llm_prompts.pkl"
+    gold_next_POIIds_path = out_dir / f"{city}_gold_next_POIIds.pkl"
     metrics_path = out_dir / f"{city}_union_reranker_metrics.csv"
     details_path = out_dir / f"{city}_union_reranker_details.csv"
+
+    with open(prompts_path, "wb") as f:
+        pickle.dump(prompts, f)
+    with open(gold_next_POIIds_path, "wb") as f:
+        pickle.dump(gold_next_POIIds, f)
     metrics.to_csv(metrics_path, index=False)
     details.to_csv(details_path, index=False)
+
+    cprint(f"Wrote prompts to {prompts_path.name}", "green")
+    cprint(f"Wrote gold_next_POIIds to {gold_next_POIIds_path.name}", "green")
     cprint(f"Wrote metrics to {metrics_path}", "green")
     cprint(f"Wrote details to {details_path}", "green")
