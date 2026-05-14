@@ -39,7 +39,6 @@ from termcolor import cprint
 from tqdm import tqdm
 
 import pickle
-import time
 from pathlib import Path
 import concurrent.futures
 import multiprocessing as mp
@@ -65,6 +64,9 @@ try:
 except ImportError:
     raise ImportError("lightgbm not installed. pip install lightgbm")
 
+import warnings
+
+warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Feature names (consistent ordering)
@@ -96,6 +98,12 @@ RERANKER_FEATURE_NAMES = [
     "in_st_pool",
     "in_ds_pool",
     "in_both_pools",
+    # LGBMRank
+    "rank_st_transition_weight",
+    "rank_st_context_score_max",
+    "rank_distance_to_candidate_m",
+    "rank_ds_candidate_prob",
+    "rank_st_from_exact_poi",
 ]
 
 
@@ -546,6 +554,17 @@ def generate_union_candidates_for_query(
         config=config,
         recent_k=recent_k,
     )
+
+    for col, ascending in [
+        ("st_transition_weight", False),
+        ("st_context_score_max", False),
+        ("distance_to_candidate_m", True),
+        ("ds_candidate_prob", False),
+        ("st_from_exact_poi", False),
+    ]:
+        if col in features_df.columns:
+            features_df[f"rank_{col}"] = features_df[col].rank(ascending=ascending, method="min")
+
     return features_df
 
 
@@ -841,6 +860,7 @@ def build_reranker_training_data(
         "exclude_same_session": exclude_same_session,
     }
 
+    chunk_size = max(1, int(len(query_records) // max_workers))
     chunks = _chunked(query_records, chunk_size)
 
     def _merge_chunk_result(result: dict[str, Any]) -> None:
@@ -1050,10 +1070,11 @@ def rerank_candidates(
     X = np.nan_to_num(X, nan=0.0)
     X_scaled = reranker.scaler.transform(X)
 
-    proba = reranker.model.predict_proba(X_scaled)[:, 1]
+    # proba = reranker.model.predict_proba(X_scaled)[:, 1]
+    scores = reranker.model.predict(X_scaled)
 
     result = features_df.copy()
-    result["reranker_score"] = proba
+    result["reranker_score"] = scores
     result = result.sort_values("reranker_score", ascending=False).reset_index(drop=True)
 
     return result.head(top_m)
@@ -1376,17 +1397,38 @@ if __name__ == "__main__":
         max_queries_per_session=None,
         max_samples=3000,  # start small, increase later
         train_on_pool_hits_only=True,
-        max_workers=4,  # set to 4-8 on Linux for the full training-data build
-        chunk_size=500,
+        max_workers=32,  # set to 4-8 on Linux for the full training-data build
         # mp_start_method="fork",
     )
 
+    with open(scrip_dir / f"artifacts/{city}/{city}_x_train.pkl", "wb") as f:
+        pickle.dump(X_train, f)
+    with open(scrip_dir / f"artifacts/{city}/{city}_y_train.pkl", "wb") as f:
+        pickle.dump(y_train, f)
+    with open(scrip_dir / f"artifacts/{city}/{city}_meta_train.pkl", "wb") as f:
+        pickle.dump(meta_train, f)
+
     # ── Step 2: Train the reranker ──────────────────────────────────
     # Start with logistic regression (interpretable, fast)
-    reranker = train_reranker(X_train, y_train, model_type="logistic")
+    # reranker = train_reranker(X_train, y_train, model_type="logistic")
 
     # Then try LightGBM (better at non-linear interactions):
-    # reranker = train_reranker(X_train, y_train, model_type="lgbm")
+    groups_train = meta_train.groupby("query_id", sort=False).size().to_numpy()
+    assert groups_train.sum() == len(X_train), "Group sizes don't sum to total rows"
+
+    reranker = lgb.LGBMRanker(
+        objective="lambdarank",
+        metric="ndcg",
+        eval_at=[1, 5, 20],
+        n_estimators=300,
+        max_depth=6,
+        learning_rate=0.05,
+        subsample=0.8,
+        random_state=42,
+        verbose=-1,
+    )
+    reranker.fit(X_train, y_train, group=groups_train)
+    reranker = train_reranker(X_train, y_train, model_type="lgbm")
 
     # ── Step 3: Evaluate ────────────────────────────────────────────
     metrics, details = evaluate_union_reranker(
