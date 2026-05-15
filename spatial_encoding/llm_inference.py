@@ -8,7 +8,7 @@ import pandas as pd
 from termcolor import cprint
 from vllm import LLM, SamplingParams
 
-from llm_reranker import parse_llm_response_with_metadata
+from llm_prompt_generator import parse_llm_response_with_metadata
 
 
 def _normalize_poi_id(value):
@@ -50,7 +50,9 @@ if __name__ == "__main__":
         raise ValueError(
             f"Prompt/gold length mismatch: {len(prompts)} prompts vs {len(gold_next_poi_ids)} gold labels."
         )
-    prompts_with_candidate_number = sum("candidate_number" in str(prompt.get("user", "")) for prompt in prompts)
+    prompts_with_candidate_number = sum(
+        "candidate_number" in str(prompt.get("user", "")) for prompt in prompts
+    )
     prompts_with_model_rank = sum("model_rank" in str(prompt.get("user", "")) for prompt in prompts)
     cprint(
         f"Prompt format check: candidate_number={prompts_with_candidate_number}/{len(prompts)}, "
@@ -64,11 +66,12 @@ if __name__ == "__main__":
             "yellow",
         )
 
-    llm = LLM(model="/root/autodl-tmp/hf-models/Qwen3-8B", trust_remote_code=True)
+    llm = LLM(
+        model="/root/autodl-tmp/hf-models/Qwen3-8B", trust_remote_code=True, gpu_memory_utilization=0.95
+    )
     tokenizer = llm.get_tokenizer()
 
-    # Use deterministic, short decoding for a forced-choice reranking task.
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+    sampling_params = SamplingParams(temperature=0.2, max_tokens=1024)
 
     messages = []
     for prompt in prompts:

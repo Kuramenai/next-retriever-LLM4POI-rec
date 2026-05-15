@@ -388,7 +388,7 @@ DEFAULT_INSTRUCTION = (
 def build_reranking_prompt(
     prefix_checkins_df: pd.DataFrame,
     candidate_df: pd.DataFrame,
-    poi_descriptor_df: pd.DataFrame,
+    poi_coord_map: dict[int, tuple[float, float]],
     config,
     *,
     ordering: str = "reranker",
@@ -412,7 +412,7 @@ def build_reranking_prompt(
     # Build narrative
     narrative = build_session_narrative(
         prefix_checkins_df=prefix_checkins_df,
-        poi_descriptor_df=poi_descriptor_df,
+        poi_coord_map=poi_coord_map,
         config=config,
         recent_k=recent_k,
     )
@@ -448,7 +448,7 @@ def build_reranking_prompt(
 def llm_prompt_generator(
     test_checkins_df: pd.DataFrame,
     *,
-    poi_descriptor_df: pd.DataFrame,
+    poi_coord_map: dict[int, tuple[float, float]],
     lookup_df: pd.DataFrame,
     coord_df: pd.DataFrame,
     transition_index: TransitionIndex,
@@ -547,7 +547,7 @@ def llm_prompt_generator(
             prompt = build_reranking_prompt(
                 prefix_checkins_df=prefix_df,
                 candidate_df=candidate_pois,
-                poi_descriptor_df=poi_descriptor_df,
+                poi_coord_map=poi_coord_map,
                 config=config,
                 recent_k=recent_k,
             )
@@ -810,7 +810,7 @@ if __name__ == "__main__":
     recent_k = 4
     prompts, gold_next_POIIds = llm_prompt_generator(
         test_checkins_df=test_checkins,
-        poi_descriptor_df=poi_descriptor_df,
+        poi_coord_map=poi_coord_map,
         lookup_df=lookup_df,
         coord_df=coord_df,
         transition_index=transition_index,
