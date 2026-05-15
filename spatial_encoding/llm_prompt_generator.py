@@ -371,18 +371,20 @@ DEFAULT_SYSTEM_PROMPT = (
     "and a list of candidate Points of Interest (POIs), predict which ONE "
     "candidate POI the user will most likely visit next. "
     "Consider the time of day, the user's movement patterns, "
-    "and the types of places they have been visiting. The candidates are "
-    "already ordered by a trained ranking model, so use model_rank/model_score "
-    "as a strong prior and only move away from the top-ranked candidates when "
-    "the context strongly supports it."
+    "and the types of places they have been visiting. "
+    "Respond with JSON only, using this exact schema: "
+    '{"candidate_number": <one integer from the candidate list>}. '
+    "Do not invent a POI and do not return explanatory text."
 )
+
+# The candidates are "
+# "already ordered by a trained ranking model, so use model_rank/model_score "
+# "as a strong prior and only move away from the top-ranked candidates when "
+#  "the context strongly supports it."
 
 DEFAULT_INSTRUCTION = (
     "Based on the user's activity pattern, current time, and location context, "
     "which candidate POI will the user most likely visit next?\n\n"
-    "Respond with JSON only, using this exact schema: "
-    '{"candidate_number": <one integer from the candidate list>}. '
-    "Do not invent a POI and do not return explanatory text."
 )
 
 
@@ -399,7 +401,7 @@ def build_itinerary_summary(
     summary = ""
     df = prefix_checkins_df.copy()
     df[config.timestamp_col] = pd.to_datetime(df[config.timestamp_col])
-    df.sort_values(config.timestamp_col, config.poi_id_col).reset_index(drop=True)
+    df.sort_values([config.timestamp_col, config.poi_id_col]).reset_index(drop=True)
     prev_day = None
     prev_time_of_day = None
     for idx, row in df.iterrows():
@@ -412,16 +414,13 @@ def build_itinerary_summary(
         category = row.get(config.category_col, "Unknown")
         if idx == 0:
             summary += "The user's itinerary so far is as follows: "
-            summary += f"At {_format_time(ts)} on a {current_day} ({current_time_of_day}), \
-            the user {transition_words[random.randint(0, len(transition_words) - 1)]} a {category} (POI ID: {poi_id})."
+            summary += f"At {_format_time(ts)} on a {current_day} ({current_time_of_day}), the user {transition_words[random.randint(0, len(transition_words) - 1)]} a {category} (POI ID: {poi_id})."
         else:
             if current_day != prev_day or current_time_of_day != prev_time_of_day:
                 current_day_text = f"on a {current_day} ({current_time_of_day})"
-                summary += f" {linking_words[random.randint(0, len(linking_words) - 1)].capitalize()} at {_format_time(ts)} {current_day_text}, \
-                the user {transition_words[random.randint(0, len(transition_words) - 1)]} a {category} (POI ID: {poi_id})."
+                summary += f" {linking_words[random.randint(0, len(linking_words) - 1)].capitalize()} at {_format_time(ts)} {current_day_text}, the user {transition_words[random.randint(0, len(transition_words) - 1)]} a {category} (POI ID: {poi_id})."
             else:
-                summary += f" {linking_words[random.randint(0, len(linking_words) - 1)].capitalize()} at {_format_time(ts)}, \
-                the user {transition_words[random.randint(0, len(transition_words) - 1)]} a {category} (POI ID: {poi_id})."
+                summary += f" {linking_words[random.randint(0, len(linking_words) - 1)].capitalize()} at {_format_time(ts)}, the user {transition_words[random.randint(0, len(transition_words) - 1)]} a {category} (POI ID: {poi_id})."
 
         prev_day = current_day
         prev_time_of_day = current_time_of_day
