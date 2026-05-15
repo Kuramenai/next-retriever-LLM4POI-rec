@@ -1284,8 +1284,6 @@ def evaluate_union_reranker(
     iterator = tqdm(groups, desc="evaluate union reranker", unit="session") if show_progress else groups
 
     rows = []
-    prompts = []
-    gold_next_POIIds = []
     for session_id, session_df in iterator:
         session_df = session_df.sort_values([config.timestamp_col, config.poi_id_col]).reset_index(drop=True)
 
@@ -1336,16 +1334,6 @@ def evaluate_union_reranker(
                 if len(candidate_pois) > 0 and "reranker_score" in candidate_pois.columns
                 else []
             )
-
-            prompt = build_reranking_prompt(
-                prefix_checkins_df=prefix_df,
-                candidate_df=candidate_pois,
-                poi_descriptor_df=poi_descriptor_df,
-                config=config,
-                recent_k=recent_k,
-            )
-            prompts.append(prompt)
-            gold_next_POIIds.append(gold_poi_id)
 
             # Rank of gold
             rank = None
@@ -1428,7 +1416,7 @@ def evaluate_union_reranker(
         ].value_counts()
         summary["top_error"] = error_counts.index[0] if not error_counts.empty else None
 
-    return prompts, gold_next_POIIds, pd.DataFrame([summary]), details_df
+    return pd.DataFrame([summary]), details_df
 
 
 if __name__ == "__main__":
@@ -1487,13 +1475,25 @@ if __name__ == "__main__":
         case_coords=case_coords,
     )
 
-    # ── Step 1: Generate training data ─────────────────────────────
-    # This runs both retrievers for each training decision point
-    # and creates (features, label) pairs.
-    # Use max_samples for faster iteration during development.
+    encoder_path = scrip_dir / f"artifacts/{city}/{city}_encoder.pkl"
+    transition_index_path = scrip_dir / f"artifacts/{city}/{city}_transition_index.pkl"
+    retrieval_index_path = scrip_dir / f"artifacts/{city}/{city}_retrieval_index.pkl"
 
-    nearby_radius = 2000
+    with open(encoder_path, "wb") as f:
+        pickle.dump(encoder, f)
+    cprint(f"Wrote encoder to {encoder_path}", "green")
+
+    with open(transition_index_path, "wb") as f:
+        pickle.dump(transition_index, f)
+    cprint(f"Wrote transition index to {transition_index_path}", "green")
+
+    with open(retrieval_index_path, "wb") as f:
+        pickle.dump(retrieval_index, f)
+    cprint(f"Wrote retrieval index to {retrieval_index_path}", "green")
+
+    # ── Step 1: Generate training data ─────────────────────────────
     source_tau = 300
+    nearby_radius = 2000
 
     x_train_path = scrip_dir / f"artifacts/{city}/{city}_x_train.pkl"
     y_train_path = scrip_dir / f"artifacts/{city}/{city}_y_train.pkl"
@@ -1536,10 +1536,10 @@ if __name__ == "__main__":
             pickle.dump(meta_train, f)
 
     # ── Step 2: Train the reranker ──────────────────────────────────
-    # Start with logistic regression (interpretable, fast)
+    # logistic regression (interpretable, fast)
     # reranker = train_reranker(X_train, y_train, model_type="logistic")
 
-    # Then try LightGBM ranker (better aligned with per-query ordering):
+    # LightGBM ranker (better aligned with per-query ordering):
     # reranker = train_lgbm_ranker(X_train, y_train, meta_train, random_state=42)
 
     # Query-balanced logistic baseline:
@@ -1551,8 +1551,15 @@ if __name__ == "__main__":
         query_balanced_weights=True,
     )
 
+    # Save the trained reranker model for later use
+    reranker_model_path = scrip_dir / f"artifacts/{city}/{city}_reranker.pkl"
+    with open(reranker_model_path, "wb") as f:
+        pickle.dump(reranker, f)
+
+    cprint(f"Wrote reranker model to {reranker_model_path}", "green")
+
     # ── Step 3: Evaluate ────────────────────────────────────────────
-    prompts, gold_next_POIIds, metrics, details = evaluate_union_reranker(
+    metrics, details = evaluate_union_reranker(
         test_checkins_df=test_checkins,
         poi_descriptor_df=poi_descriptor_df,
         lookup_df=lookup_df,
@@ -1572,19 +1579,11 @@ if __name__ == "__main__":
     print(metrics.to_string(index=False))
 
     out_dir = scrip_dir / f"artifacts/{city}"
-    prompts_path = out_dir / f"{city}_llm_prompts.pkl"
-    gold_next_POIIds_path = out_dir / f"{city}_gold_next_POIIds.pkl"
     metrics_path = out_dir / f"{city}_union_reranker_metrics.csv"
     details_path = out_dir / f"{city}_union_reranker_details.csv"
 
-    with open(prompts_path, "wb") as f:
-        pickle.dump(prompts, f)
-    with open(gold_next_POIIds_path, "wb") as f:
-        pickle.dump(gold_next_POIIds, f)
     metrics.to_csv(metrics_path, index=False)
     details.to_csv(details_path, index=False)
 
-    cprint(f"Wrote prompts to {prompts_path.name}", "green")
-    cprint(f"Wrote gold_next_POIIds to {gold_next_POIIds_path.name}", "green")
     cprint(f"Wrote metrics to {metrics_path}", "green")
     cprint(f"Wrote details to {details_path}", "green")
