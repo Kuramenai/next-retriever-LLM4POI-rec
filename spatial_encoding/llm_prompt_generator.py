@@ -21,6 +21,7 @@ from pathlib import Path
 import pickle
 import json
 import re
+import random
 
 import numpy as np
 import pandas as pd
@@ -385,6 +386,49 @@ DEFAULT_INSTRUCTION = (
 )
 
 
+def build_itinerary_summary(
+    prefix_checkins_df: pd.DataFrame,
+    config,
+    recent_k: int = 4,
+) -> str:
+    """
+    Build a summary of the user's itinerary so far.
+    """
+    transition_words = ["arrived at", "visited", "stayed at", "spent time at", "was at"]
+    linking_words = ["and", "then", "next", "afterwards", "finally", "additionally", "furthermore"]
+    summary = ""
+    df = prefix_checkins_df.copy()
+    df[config.timestamp_col] = pd.to_datetime(df[config.timestamp_col])
+    df.sort_values(config.timestamp_col, config.poi_id_col).reset_index(drop=True)
+    prev_day = None
+    prev_time_of_day = None
+    for idx, row in df.iterrows():
+        poi_id = row[config.poi_id_col]
+        ts = row[config.timestamp_col]
+        current_hour = ts.hour
+        current_day = _format_day(ts)
+        current_time_of_day = _time_of_day_label(current_hour)
+
+        category = row.get(config.category_col, "Unknown")
+        if idx == 0:
+            summary += "The user's itinerary so far is as follows: "
+            summary += f"At {_format_time(ts)} on a {current_day} ({current_time_of_day}), \
+            the user {transition_words[random.randint(0, len(transition_words) - 1)]} a {category} (POI ID: {poi_id})."
+        else:
+            if current_day != prev_day or current_time_of_day != prev_time_of_day:
+                current_day_text = f"on a {current_day} ({current_time_of_day})"
+                summary += f" {linking_words[random.randint(0, len(linking_words) - 1)].capitalize()} at {_format_time(ts)} {current_day_text}, \
+                the user {transition_words[random.randint(0, len(transition_words) - 1)]} a {category} (POI ID: {poi_id})."
+            else:
+                summary += f" {linking_words[random.randint(0, len(linking_words) - 1)].capitalize()} at {_format_time(ts)}, \
+                the user {transition_words[random.randint(0, len(transition_words) - 1)]} a {category} (POI ID: {poi_id})."
+
+        prev_day = current_day
+        prev_time_of_day = current_time_of_day
+
+    return summary
+
+
 def build_reranking_prompt(
     prefix_checkins_df: pd.DataFrame,
     candidate_df: pd.DataFrame,
@@ -417,6 +461,12 @@ def build_reranking_prompt(
         recent_k=recent_k,
     )
 
+    itinerary_summary = build_itinerary_summary(
+        prefix_checkins_df=prefix_checkins_df,
+        config=config,
+        recent_k=recent_k,
+    )
+
     # Format candidates
     candidates_text, ordered_df = format_candidates_for_llm(
         candidate_df=candidate_df,
@@ -431,7 +481,9 @@ def build_reranking_prompt(
     if instruction is None:
         instruction = DEFAULT_INSTRUCTION
 
-    user_message = f"{narrative['full_narrative']}\n\n{candidates_text}\n\n{instruction}"
+    user_message = (
+        f"{narrative['full_narrative']}\n\n{itinerary_summary}\n\n{candidates_text}\n\n{instruction}"
+    )
 
     if system_prompt is None:
         system_prompt = DEFAULT_SYSTEM_PROMPT
