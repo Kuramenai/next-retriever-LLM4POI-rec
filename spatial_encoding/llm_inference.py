@@ -50,6 +50,19 @@ if __name__ == "__main__":
         raise ValueError(
             f"Prompt/gold length mismatch: {len(prompts)} prompts vs {len(gold_next_poi_ids)} gold labels."
         )
+    prompts_with_candidate_number = sum("candidate_number" in str(prompt.get("user", "")) for prompt in prompts)
+    prompts_with_model_rank = sum("model_rank" in str(prompt.get("user", "")) for prompt in prompts)
+    cprint(
+        f"Prompt format check: candidate_number={prompts_with_candidate_number}/{len(prompts)}, "
+        f"model_rank={prompts_with_model_rank}/{len(prompts)}",
+        "cyan",
+    )
+    if prompts_with_candidate_number < len(prompts) or prompts_with_model_rank < len(prompts):
+        cprint(
+            "Some prompts look like they were generated with an older prompt template. "
+            "Regenerate the prompt pickle before trusting LLM metrics.",
+            "yellow",
+        )
 
     llm = LLM(model="/root/autodl-tmp/hf-models/Qwen3-8B", trust_remote_code=True)
     tokenizer = llm.get_tokenizer()
@@ -125,6 +138,27 @@ if __name__ == "__main__":
     cprint(f"Parse failure rate: {parse_failure_rate:.4f}", "cyan")
     cprint(f"Mean selected position: {selected_positions.mean():.2f}", "cyan")
     cprint(f"Selected position 1 fraction: {(selected_positions == 1).mean():.4f}", "cyan")
+
+    cprint("Guardrail hit@1 if accepting the LLM only within a rank cap:", "cyan")
+    for cap in (1, 2, 3, 5, 10, max_prompt_candidates):
+        if cap <= 0:
+            continue
+        use_llm = selected_positions <= cap
+        guarded_hit = np.where(use_llm, details["is_correct_at_1"], details["ranker_top1_hit"])
+        cprint(
+            f"  accept selected_position <= {cap:<2d}: {float(np.mean(guarded_hit)):.4f} "
+            f"(accepted {float(use_llm.mean()):.4f})",
+            "cyan",
+        )
+
+    pos_summary = (
+        details.dropna(subset=["selected_position"])
+        .groupby("selected_position")["is_correct_at_1"]
+        .agg(["count", "mean"])
+        .head(10)
+    )
+    cprint("Hit rate by selected position, first 10 positions:", "cyan")
+    cprint(pos_summary.to_string(float_format="%.4f"), "cyan")
 
     parse_counts = details["parse_method"].value_counts(dropna=False).head(10)
     cprint("Top parse methods:", "cyan")

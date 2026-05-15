@@ -6,23 +6,6 @@ Pipeline:
     2. Extract per-candidate features
     3. Score with a trained model (logistic regression / LightGBM)
     4. Return top-k candidates with metadata for LLM stage
-
-Usage
------
-    # Offline: build feature matrix from training data
-    X_train, y_train, meta_train = build_reranker_training_data(
-        decision_state_table_df=train_dst,
-        transition_index=transition_index,
-        retrieval_index=retrieval_index,
-        encoder=encoder,
-        config=config,
-    )
-
-    # Train the reranker
-    reranker = train_reranker(X_train, y_train)
-
-    # Online: evaluate
-    metrics, details = evaluate_union_reranker(...)
 """
 
 from __future__ import annotations
@@ -58,7 +41,6 @@ from retrieve_candidates_pois import build_candidate_next_pois
 from extract_poi_spatial_descriptors import SpatialEncodingConfig
 from retrieve_decisions_states import build_retrieval_index
 from session_decision_state_table import build_current_decision_state
-from llm_reranker import build_reranking_prompt
 
 try:
     import lightgbm as lgb
@@ -1540,16 +1522,16 @@ if __name__ == "__main__":
     # reranker = train_reranker(X_train, y_train, model_type="logistic")
 
     # LightGBM ranker (better aligned with per-query ordering):
-    # reranker = train_lgbm_ranker(X_train, y_train, meta_train, random_state=42)
+    reranker = train_lgbm_ranker(X_train, y_train, meta_train, random_state=42)
 
     # Query-balanced logistic baseline:
-    reranker = train_reranker(
-        X_train,
-        y_train,
-        model_type="logistic",
-        meta=meta_train,
-        query_balanced_weights=True,
-    )
+    # reranker = train_reranker(
+    #     X_train,
+    #     y_train,
+    #     model_type="logistic",
+    #     meta=meta_train,
+    #     query_balanced_weights=True,
+    # )
 
     # Save the trained reranker model for later use
     reranker_model_path = scrip_dir / f"artifacts/{city}/{city}_reranker.pkl"
