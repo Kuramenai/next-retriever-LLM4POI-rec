@@ -352,9 +352,8 @@ def format_candidates_for_llm(
                 support_parts.append(f"{label}={float(value):.4f}")
         support_text = f"; evidence={', '.join(support_parts)}" if support_parts else ""
         line = (
-            f"{idx}. candidate_number={idx}; poi_id={poi_id}; "
-            f"category={category}; distance={dist_str}; "
-            f"model_rank={model_rank}{score_text}{source_text}{exact_text}{support_text}"
+            f"{idx}. candidate_number={idx}; poi_id={poi_id}; category={category}; distance={dist_str}; "
+            # f"model_rank={model_rank}{score_text}{source_text}{exact_text}{support_text}"
         )
         lines.append(line)
 
@@ -408,7 +407,7 @@ def build_itinerary_summary(
     for idx, row in df.iterrows():
         poi_id = row[config.poi_id_col]
         # poi_address = poi_meta_dict[poi_id]["PoiAddress"]
-        poi_description = poi_meta_dict[poi_id]["PoiDescription"]
+        poi_description = poi_meta_dict[poi_id]["PoiDescriptions"]
         # poi_name = poi_meta_dict[poi_id]["PoiName"]
         ts = row[config.timestamp_col]
         current_hour = ts.hour
@@ -487,9 +486,7 @@ def build_reranking_prompt(
     if instruction is None:
         instruction = DEFAULT_INSTRUCTION
 
-    user_message = (
-        f"{narrative['full_narrative']}\n\n{itinerary_summary}\n\n{candidates_text}\n\n{instruction}"
-    )
+    user_message = f"{narrative['full_narrative']}\n\n{candidates_text}\n\n{instruction}"
 
     if system_prompt is None:
         system_prompt = DEFAULT_SYSTEM_PROMPT
@@ -610,6 +607,7 @@ def llm_prompt_generator(
                 poi_meta_dict=poi_meta_dict,
                 config=config,
                 recent_k=recent_k,
+                ordering="random",
             )
             prompts.append(prompt)
             gold_next_POIIds.append(_normalize(gold_poi_id))
