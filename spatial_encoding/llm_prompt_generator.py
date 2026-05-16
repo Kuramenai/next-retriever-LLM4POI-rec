@@ -298,13 +298,16 @@ def order_candidates(
 
 
 def format_candidates_for_llm(
-    candidate_df: pd.DataFrame,
-    current_lat: float,
-    current_lon: float,
+    candidate_df,
+    current_lat,
+    current_lon,
     *,
-    ordering: str = "reranker",
-    random_state: int = 42,
-    max_candidates: int = 20,
+    ordering="reranker",
+    random_state=42,
+    max_candidates=20,
+    include_model_rank=True,
+    include_model_score=True,
+    include_source_evidence=True,
 ) -> tuple[str, pd.DataFrame]:
     """
     Format candidate POIs as a readable list for the LLM prompt.
@@ -333,7 +336,6 @@ def format_candidates_for_llm(
         line = f"{idx}. [ID: {poi_id}] {category} — {dist_str}"
         model_rank = int(row.get("_original_rank", idx))
         score = row.get("reranker_score", np.nan)
-        score_text = f"; model_score={float(score):.4f}" if not pd.isna(score) else ""
         source_text = ""
         if "in_both_pools" in row and bool(row.get("in_both_pools", 0)):
             source_text = "; source=spatial+decision"
@@ -356,10 +358,34 @@ def format_candidates_for_llm(
             if not pd.isna(value):
                 support_parts.append(f"{label}={float(value):.4f}")
         support_text = f"; evidence={', '.join(support_parts)}" if support_parts else ""
-        line = (
-            f"{idx}. candidate_number={idx}; poi_id={poi_id}; category={category}; distance={dist_str}; "
-            # f"model_rank={model_rank}{score_text}{source_text}{exact_text}{support_text}"
-        )
+
+        parts = [
+            f"{idx}. candidate_number={idx}",
+            f"poi_id={poi_id}",
+            f"category={category}",
+            f"distance={dist_str}",
+        ]
+
+        if include_model_rank:
+            parts.append(f"model_rank={model_rank}")
+
+        if include_model_score and not pd.isna(score):
+            parts.append(f"model_score={float(score):.4f}")
+
+        if include_source_evidence:
+            if source_text:
+                parts.append(source_text.lstrip("; "))
+            if exact_text:
+                parts.append(exact_text.lstrip("; "))
+            if support_text:
+                parts.append(support_text.lstrip("; "))
+
+        line = "; ".join(parts)
+
+        # line = (
+        #     f"{idx}. candidate_number={idx}; poi_id={poi_id}; category={category}; distance={dist_str}; "
+        #     # f"model_rank={model_rank}{score_text}{source_text}{exact_text}{support_text}"
+        # )
         lines.append(line)
 
     text = "Candidate next POIs:\n" + "\n".join(lines)
@@ -451,6 +477,9 @@ def build_reranking_prompt(
     instruction: Optional[str] = None,
     random_state: int = 42,
     include_system: bool = True,
+    include_model_rank: bool = True,
+    include_model_score: bool = True,
+    include_source_evidence: bool = True,
 ) -> dict:
     """
     Build the complete LLM reranking prompt.
@@ -485,6 +514,9 @@ def build_reranking_prompt(
         ordering=ordering,
         random_state=random_state,
         max_candidates=max_candidates,
+        include_model_rank=include_model_rank,
+        include_model_score=include_model_score,
+        include_source_evidence=include_source_evidence,
     )
 
     # Assemble user message
@@ -529,6 +561,9 @@ def llm_prompt_generator(
     max_sessions: Optional[int] = None,
     ordering: str = "reranker",
     random_state: int = 42,
+    include_model_rank: int = False,
+    include_model_score: int = False,
+    include_source_evidence: int = False,
     show_progress: bool = True,
 ) -> tuple[list[dict], list[int]]:
     """Generate LLM prompts and gold next POI IDs for the given test checkins."""
@@ -618,6 +653,9 @@ def llm_prompt_generator(
                 recent_k=recent_k,
                 ordering=ordering,
                 random_state=prompt_seed,
+                include_model_rank=include_model_rank,
+                include_model_score=include_model_score,
+                include_source_evidence=include_source_evidence,
             )
             prompts.append(prompt)
             gold_next_POIIds.append(_normalize(gold_poi_id))
@@ -897,6 +935,9 @@ if __name__ == "__main__":
         recent_k=recent_k,
         min_checkins=3,
         ordering=ordering,
+        include_model_rank=True,
+        include_model_score=True,
+        include_source_evidence=True,
     )
 
     out_dir = scrip_dir / f"artifacts/{city}"
