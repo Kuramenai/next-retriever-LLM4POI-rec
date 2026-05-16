@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 from termcolor import cprint
 
+import hashlib
 from tqdm import tqdm
 from spatial_transition_retriever import TransitionIndex
 from extract_poi_spatial_descriptors import SpatialEncodingConfig
@@ -103,6 +104,10 @@ def _format_distance(dist_m: float) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Session narrative builder
 # ═══════════════════════════════════════════════════════════════════════════════
+def stable_seed(base_seed: int, key) -> int:
+    digest = hashlib.md5(str(key).encode("utf-8")).hexdigest()
+    key_int = int(digest[:8], 16)
+    return int((base_seed + key_int) % (2**32 - 1))
 
 
 def build_session_narrative(
@@ -507,6 +512,7 @@ def llm_prompt_generator(
     poi_meta_dict: dict[int, dict],
     lookup_df: pd.DataFrame,
     coord_df: pd.DataFrame,
+    poi_descriptor_df: pd.DataFrame,
     transition_index: TransitionIndex,
     retrieval_index: DecisionStateRetrievalIndex,
     encoder: DecisionStateEncoder,
@@ -521,6 +527,7 @@ def llm_prompt_generator(
     recent_k: Optional[int] = None,
     min_checkins: int = 2,
     max_sessions: Optional[int] = None,
+    ordering: str = "reranker",
     random_state: int = 42,
     show_progress: bool = True,
 ) -> tuple[list[dict], list[int]]:
@@ -600,6 +607,8 @@ def llm_prompt_generator(
 
             candidate_pois = result["candidate_pois"]
 
+            prompt_seed = stable_seed(random_state, session_id)
+
             prompt = build_reranking_prompt(
                 prefix_checkins_df=prefix_df,
                 candidate_df=candidate_pois,
@@ -607,14 +616,15 @@ def llm_prompt_generator(
                 poi_meta_dict=poi_meta_dict,
                 config=config,
                 recent_k=recent_k,
-                ordering="random",
+                ordering=ordering,
+                random_state=prompt_seed,
             )
             prompts.append(prompt)
             gold_next_POIIds.append(_normalize(gold_poi_id))
 
         except Exception as e:
             cprint(f"Error generating prompt for session {session_id}: {e!r}", "red")
-            gold_next_POIIds.append(None)
+            continue
 
     return prompts, gold_next_POIIds
 
@@ -842,9 +852,6 @@ if __name__ == "__main__":
 
     # ── Generate prompts and gold next POI IDs ────────────────────
 
-    source_tau = 300
-    nearby_radius = 2000
-
     encoder_path = scrip_dir / f"artifacts/{city}/{city}_encoder.pkl"
     transition_index_path = scrip_dir / f"artifacts/{city}/{city}_transition_index.pkl"
     retrieval_index_path = scrip_dir / f"artifacts/{city}/{city}_retrieval_index.pkl"
@@ -870,12 +877,16 @@ if __name__ == "__main__":
         )
 
     recent_k = 4
+    ordering = "reranker"
+    nearby_radius = 1000.0
+    source_tau = 300.0
     prompts, gold_next_POIIds = llm_prompt_generator(
         test_checkins_df=test_checkins,
         poi_coord_map=poi_coord_map,
         poi_meta_dict=poi_meta_dict,
         lookup_df=lookup_df,
         coord_df=coord_df,
+        poi_descriptor_df=poi_descriptor_df,
         transition_index=transition_index,
         retrieval_index=retrieval_index,
         encoder=encoder,
@@ -885,6 +896,7 @@ if __name__ == "__main__":
         source_tau_m=source_tau,
         recent_k=recent_k,
         min_checkins=3,
+        ordering=ordering,
     )
 
     out_dir = scrip_dir / f"artifacts/{city}"

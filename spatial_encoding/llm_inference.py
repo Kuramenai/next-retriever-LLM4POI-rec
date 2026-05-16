@@ -34,6 +34,20 @@ def _gold_rank_in_candidates(gold_poi_id, ordered_candidates: pd.DataFrame) -> i
     return None
 
 
+def _get_ranker_top1_from_ordered(ordered_candidates: pd.DataFrame):
+    if "_original_rank" in ordered_candidates.columns:
+        rows = ordered_candidates.loc[ordered_candidates["_original_rank"] == 1]
+        if len(rows) > 0:
+            row = rows.iloc[0]
+            return _normalize_poi_id(row["next_POIId"]), int(row.name) + 1
+
+    # fallback only when no shuffle metadata exists
+    if len(ordered_candidates) > 0:
+        return _normalize_poi_id(ordered_candidates.iloc[0]["next_POIId"]), 1
+
+    return None, None
+
+
 if __name__ == "__main__":
     city = "nyc"
     script_dir = Path(__file__).resolve().parent.parent
@@ -104,17 +118,14 @@ if __name__ == "__main__":
         gold_norm = _normalize_poi_id(gold_next_poi_id)
         pred_norm = _normalize_poi_id(predicted_next_poi_id)
         gold_rank = _gold_rank_in_candidates(gold_next_poi_id, ordered_candidates)
-        ranker_top1 = (
-            _normalize_poi_id(ordered_candidates.iloc[0]["next_POIId"])
-            if len(ordered_candidates) > 0
-            else None
-        )
+        ranker_top1, prompt_position_of_ranker_top1 = _get_ranker_top1_from_ordered(ordered_candidates)
 
         rows.append(
             {
                 "query_index": i,
                 "gold_next_POIId": gold_next_poi_id,
                 "predicted_next_POIId": predicted_next_poi_id,
+                "prompt_position_of_ranker_top1": prompt_position_of_ranker_top1,
                 "selected_position": parse["selected_position"],
                 "parse_method": parse["parse_method"],
                 "is_parse_failure": predicted_next_poi_id is None,
