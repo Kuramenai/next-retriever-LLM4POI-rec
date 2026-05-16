@@ -390,6 +390,7 @@ DEFAULT_INSTRUCTION = (
 
 def build_itinerary_summary(
     prefix_checkins_df: pd.DataFrame,
+    poi_meta_dict: dict[int, dict],
     config,
     recent_k: int = 4,
 ) -> str:
@@ -406,21 +407,25 @@ def build_itinerary_summary(
     prev_time_of_day = None
     for idx, row in df.iterrows():
         poi_id = row[config.poi_id_col]
+        # poi_address = poi_meta_dict[poi_id]["PoiAddress"]
+        poi_description = poi_meta_dict[poi_id]["PoiDescription"]
+        # poi_name = poi_meta_dict[poi_id]["PoiName"]
         ts = row[config.timestamp_col]
         current_hour = ts.hour
         current_day = _format_day(ts)
         current_time_of_day = _time_of_day_label(current_hour)
 
-        category = row.get(config.category_col, "Unknown")
+        # category = row.get(config.category_col, "Unknown")
+
         if idx == 0:
             summary += "The user's itinerary so far is as follows: "
-            summary += f"At {_format_time(ts)} on a {current_day} ({current_time_of_day}), the user {transition_words[random.randint(0, len(transition_words) - 1)]} a {category} (POI ID: {poi_id})."
+            summary += f"At {_format_time(ts)} on a {current_day} ({current_time_of_day}), the user {transition_words[random.randint(0, len(transition_words) - 1)]} a {poi_description} (POI ID: {poi_id})."
         else:
             if current_day != prev_day or current_time_of_day != prev_time_of_day:
                 current_day_text = f"on a {current_day} ({current_time_of_day})"
-                summary += f" {linking_words[random.randint(0, len(linking_words) - 1)].capitalize()} at {_format_time(ts)} {current_day_text}, the user {transition_words[random.randint(0, len(transition_words) - 1)]} a {category} (POI ID: {poi_id})."
+                summary += f" {linking_words[random.randint(0, len(linking_words) - 1)].capitalize()} at {_format_time(ts)} {current_day_text}, the user {transition_words[random.randint(0, len(transition_words) - 1)]} a {poi_description} (POI ID: {poi_id})."
             else:
-                summary += f" {linking_words[random.randint(0, len(linking_words) - 1)].capitalize()} at {_format_time(ts)}, the user {transition_words[random.randint(0, len(transition_words) - 1)]} a {category} (POI ID: {poi_id})."
+                summary += f" {linking_words[random.randint(0, len(linking_words) - 1)].capitalize()} at {_format_time(ts)}, the user {transition_words[random.randint(0, len(transition_words) - 1)]} a {poi_description} (POI ID: {poi_id})."
 
         prev_day = current_day
         prev_time_of_day = current_time_of_day
@@ -432,6 +437,7 @@ def build_reranking_prompt(
     prefix_checkins_df: pd.DataFrame,
     candidate_df: pd.DataFrame,
     poi_coord_map: dict[int, tuple[float, float]],
+    poi_meta_dict: dict[int, dict],
     config,
     *,
     ordering: str = "reranker",
@@ -462,6 +468,7 @@ def build_reranking_prompt(
 
     itinerary_summary = build_itinerary_summary(
         prefix_checkins_df=prefix_checkins_df,
+        poi_meta_dict=poi_meta_dict,
         config=config,
         recent_k=recent_k,
     )
@@ -500,6 +507,7 @@ def llm_prompt_generator(
     test_checkins_df: pd.DataFrame,
     *,
     poi_coord_map: dict[int, tuple[float, float]],
+    poi_meta_dict: dict[int, dict],
     lookup_df: pd.DataFrame,
     coord_df: pd.DataFrame,
     transition_index: TransitionIndex,
@@ -599,6 +607,7 @@ def llm_prompt_generator(
                 prefix_checkins_df=prefix_df,
                 candidate_df=candidate_pois,
                 poi_coord_map=poi_coord_map,
+                poi_meta_dict=poi_meta_dict,
                 config=config,
                 recent_k=recent_k,
             )
@@ -811,11 +820,15 @@ if __name__ == "__main__":
     scrip_dir = Path(__file__).resolve().parent.parent
 
     poi_descriptor_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi_descriptor.csv")
+    poi_meta_df = pd.read_csv(scrip_dir / f"artifacts/{city}/{city}_poi_meta.csv")
+    poi_meta = poi_meta_df.set_index("PoiId")
+    poi_meta_dict = poi_meta.to_dict(orient="index")
 
     with open(scrip_dir / f"artifacts/{city}/{city}_pair_lookup.pkl", "rb") as f:
         pair_lookup = pickle.load(f)
     with open(scrip_dir / f"artifacts/{city}/{city}_poi_coord_map.pkl", "rb") as f:
         poi_coord_map = pickle.load(f)
+
     lookup_df = pd.DataFrame.from_dict(pair_lookup, orient="index")
     lookup_df.index = pd.MultiIndex.from_tuples(lookup_df.index, names=["src_POIId", "dst_POIId"])  # fmt: skip
     coord_df = pd.DataFrame.from_dict(poi_coord_map, orient="index")
@@ -862,6 +875,7 @@ if __name__ == "__main__":
     prompts, gold_next_POIIds = llm_prompt_generator(
         test_checkins_df=test_checkins,
         poi_coord_map=poi_coord_map,
+        poi_meta_dict=poi_meta_dict,
         lookup_df=lookup_df,
         coord_df=coord_df,
         transition_index=transition_index,
